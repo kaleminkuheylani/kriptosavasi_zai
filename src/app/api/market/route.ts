@@ -20,20 +20,38 @@ async function fetchMarketData() {
   }
 
   try {
-    const listResponse = await fetch('https://api.asenax.com/bist/list');
-    const listData = await listResponse.json();
+    const allStocks: { code: string; name: string }[] = [];
+    const seenCodes = new Set<string>();
 
-    if (listData.code !== "0" || !Array.isArray(listData.data)) {
+    for (let page = 1; page <= 7; page++) {
+      const listResponse = await fetch(`https://api.asenax.com/bist/list?sayfa=${page}`);
+      const listData = await listResponse.json();
+
+      if (listData.code !== "0" || !Array.isArray(listData.data) || listData.data.length === 0) {
+        break;
+      }
+
+      const pageStocks = listData.data
+        .filter((item: { tip?: string }) => item.tip === "Hisse")
+        .map((item: { kod?: string; ad?: string }) => ({
+          code: item.kod || '',
+          name: item.ad || ''
+        }))
+        .filter((s: { code: string }) => s.code.length > 0 && !seenCodes.has(s.code));
+
+      if (pageStocks.length === 0) break;
+
+      pageStocks.forEach((s: { code: string; name: string }) => {
+        seenCodes.add(s.code);
+        allStocks.push(s);
+      });
+    }
+
+    if (allStocks.length === 0) {
       return null;
     }
 
-    const stocks = listData.data
-      .filter((item: { tip?: string }) => item.tip === "Hisse")
-      .slice(0, 1000)
-      .map((item: { kod?: string; ad?: string }) => ({
-        code: item.kod || '',
-        name: item.ad || ''
-      }));
+    const stocks = allStocks;
 
     const results: StockData[] = [];
 

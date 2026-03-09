@@ -23,24 +23,41 @@ interface StockData {
 // Asenax API'den hisse listesi ve fiyatları
 async function fetchStocksFromAPI(): Promise<{ success: boolean; data?: StockData[]; error?: string }> {
   try {
-    // Hisse listesini al
-    const listResponse = await fetch('https://api.asenax.com/bist/list', {
-      next: { revalidate: 60 }
-    });
-    const listData = await listResponse.json();
+    // Tüm sayfalardan hisse listesini al
+    const allStocks: { code: string; name: string }[] = [];
+    const seenCodes = new Set<string>();
 
-    if (listData.code !== "0" || !Array.isArray(listData.data)) {
+    for (let page = 1; page <= 7; page++) {
+      const listResponse = await fetch(`https://api.asenax.com/bist/list?sayfa=${page}`, {
+        next: { revalidate: 60 }
+      });
+      const listData = await listResponse.json();
+
+      if (listData.code !== "0" || !Array.isArray(listData.data) || listData.data.length === 0) {
+        break;
+      }
+
+      const pageStocks = listData.data
+        .filter((item: { tip?: string }) => item.tip === "Hisse")
+        .map((item: { kod?: string; ad?: string }) => ({
+          code: item.kod || '',
+          name: item.ad || ''
+        }))
+        .filter((s: { code: string }) => s.code.length > 0 && !seenCodes.has(s.code));
+
+      if (pageStocks.length === 0) break;
+
+      pageStocks.forEach((s: { code: string; name: string }) => {
+        seenCodes.add(s.code);
+        allStocks.push(s);
+      });
+    }
+
+    if (allStocks.length === 0) {
       return { success: false, error: 'Liste alınamadı' };
     }
 
-    // Sadece hisseleri filtrele
-    const stocks = listData.data
-      .filter((item: { tip?: string }) => item.tip === "Hisse")
-      .map((item: { kod?: string; ad?: string }) => ({
-        code: item.kod || '',
-        name: item.ad || ''
-      }))
-      .filter((s: { code: string }) => s.code.length > 0);
+    const stocks = allStocks;
 
     // Fiyatları toplu al (batch)
     const results: StockData[] = [];
