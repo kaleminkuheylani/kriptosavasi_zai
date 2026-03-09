@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSupabase } from '@/lib/supabase';
+import Groq from 'groq-sdk';
 import ZAI from 'z-ai-web-dev-sdk';
 
 // ============================================
@@ -48,6 +49,111 @@ const TOOLS_INFO: Record<string, { name: string; description: string }> = {
   analyze_chart_image: { name: 'Grafik Analizi', description: 'Grafik analiz ediliyor...' },
   read_txt_file: { name: 'TXT Analizi', description: 'Dosya analiz ediliyor...' },
 };
+
+// Groq tool definitions (OpenAI-compatible function calling format)
+const GROQ_TOOL_DEFINITIONS: Groq.Chat.Completions.ChatCompletionTool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_price',
+      description: 'BIST hissesinin güncel fiyat bilgisini al (fiyat, değişim, hacim, tavan/taban)',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Hisse sembolü (örn: THYAO, GARAN, ASELS)' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_history',
+      description: 'Hisse geçmiş fiyat verisi ve teknik göstergeler (SMA20, SMA50, RSI, trend)',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Hisse sembolü' },
+          period: { type: 'string', enum: ['1M', '3M', '6M', '1Y'], description: 'Zaman dilimi' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_watchlist',
+      description: 'Kullanıcının takip listesini göster',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_to_watchlist',
+      description: 'Hisse senedini takip listesine ekle',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Hisse sembolü' },
+          name: { type: 'string', description: 'Hisse adı' }
+        },
+        required: ['symbol', 'name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remove_from_watchlist',
+      description: 'Hisseyi takip listesinden çıkar',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Hisse sembolü' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Borsa ve finans haberleri için web araması yap',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Arama sorgusu' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_kap_data',
+      description: 'KAP (Kamuyu Aydınlatma Platformu) bildirimlerini al',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Hisse sembolü (opsiyonel)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'scan_market',
+      description: 'Tüm BIST piyasasını tara: en çok yükselen ve düşen hisseleri bul',
+      parameters: { type: 'object', properties: {} }
+    }
+  }
+];
 
 // ============================================
 // CACHE
@@ -213,13 +319,13 @@ async function getWatchlist(userId: string | null): Promise<ToolResult> {
   try {
     const supabase = getSupabase();
     let query = supabase.from('watchlist').select('*').order('created_at', { ascending: false });
-    
+
     if (userId) {
       query = query.eq('user_id', userId);
     } else {
       query = query.is('user_id', null);
     }
-    
+
     const { data, error } = await query;
 
     if (error) throw error;
@@ -251,13 +357,13 @@ async function removeFromWatchlist(symbol: string, userId: string | null): Promi
   try {
     const supabase = getSupabase();
     let query = supabase.from('watchlist').delete().eq('symbol', symbol.toUpperCase());
-    
+
     if (userId) {
       query = query.eq('user_id', userId);
     } else {
       query = query.is('user_id', null);
     }
-    
+
     const { error } = await query;
     if (error) throw error;
     return { success: true, _meta: { tool: 'remove_from_watchlist', duration: Date.now() - startTime } };
@@ -412,59 +518,117 @@ async function executeTool(toolName: string, params: Record<string, unknown>, us
 }
 
 // ============================================
-// QUERY ANALYZER
+// LLM SYSTEM PROMPT
 // ============================================
 
-function analyzeQuery(message: string): { type: string; symbols: string[]; tools: string[] } {
-  const upperMessage = message.toUpperCase();
-  const symbols = [...new Set(upperMessage.match(/\b([A-Z]{3,5})\b/g) || [])].filter(s => s.length >= 3 && s.length <= 5);
+const SYSTEM_PROMPT = `Sen profesyonel bir BIST (Borsa İstanbul) yatırım analiz asistanısın.
 
-  let type = 'general';
-  let tools: string[] = [];
+KURALLAR:
+1. Türkçe yanıt ver
+2. Markdown kullan (başlıklar ##, kalın **, listeler -)
+3. Emoji kullan (📊 📈 🔴 🟢 ⚠️)
+4. Asla "al/sat" tavsiyesi verme
+5. Sadece analitik yorum yap
+6. Tool'lardan gelen verileri detaylı analiz et ve yorumla
+7. Teknik göstergeleri açıkla (RSI, SMA, Trend)
+8. Risk faktörlerini belirt
+9. Sonuna uyarı ekle: "⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir."
 
-  if (/(tahmin|gelecek|ne olur|kaç olur|gün sonra)/i.test(message)) {
-    type = 'price_prediction';
-    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search'];
-  } else if (/satmalı|satsam|satayım/i.test(message)) {
-    type = 'sell_decision';
-    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search'];
-  } else if (/nereye|yatırım|öneri|hangi hisse/i.test(message)) {
-    type = 'market_overview';
-    tools = ['scan_market'];
-  } else if (/analiz|incele|detay/i.test(message)) {
-    type = 'analysis';
-    tools = symbols.length > 0 ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search'] : ['scan_market'];
-  } else if (/yükselen|kazandıran/i.test(message)) {
-    type = 'gainers';
-    tools = ['scan_market'];
-  } else if (/düşen|kaybettiren/i.test(message)) {
-    type = 'losers';
-    tools = ['scan_market'];
-  } else if (/takip|listem|watchlist/i.test(message)) {
-    type = 'watchlist';
-    tools = ['get_watchlist'];
-  } else if (symbols.length > 0) {
-    type = 'stock_price';
-    tools = ['get_stock_price', 'get_stock_history'];
-  } else {
-    tools = ['scan_market'];
+YANIT FORMATI:
+- Kısa başlık
+- Önemli veriler (fiyat, değişim)
+- Teknik analiz yorumu (tool verilerini kullanarak)
+- Risk değerlendirmesi
+- Uyarı`;
+
+// ============================================
+// GROQ FUNCTION CALLING AGENT (PRIMARY)
+// ============================================
+
+async function generateWithGroq(
+  userMessage: string,
+  userId: string | null,
+  onToolCall: (toolName: string, params: Record<string, unknown>) => Promise<ToolResult>
+): Promise<{ response: string; toolsUsed: string[] }> {
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+  const messages: Groq.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: userMessage }
+  ];
+
+  const toolsUsed: string[] = [];
+  let iterations = 0;
+  const MAX_ITERATIONS = 5;
+
+  while (iterations < MAX_ITERATIONS) {
+    iterations++;
+
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages,
+      tools: GROQ_TOOL_DEFINITIONS,
+      tool_choice: 'auto',
+      max_tokens: 2000,
+      temperature: 0.7
+    });
+
+    const choice = completion.choices[0];
+
+    if (!choice) break;
+
+    // If no tool calls, return the final text response
+    if (choice.finish_reason === 'stop' || !choice.message.tool_calls?.length) {
+      const content = choice.message.content || '';
+      if (content) {
+        return { response: content, toolsUsed };
+      }
+      break;
+    }
+
+    // Process tool calls
+    messages.push(choice.message);
+
+    for (const toolCall of choice.message.tool_calls) {
+      const toolName = toolCall.function.name;
+      let params: Record<string, unknown> = {};
+
+      try {
+        params = JSON.parse(toolCall.function.arguments || '{}');
+      } catch {
+        params = {};
+      }
+
+      // Execute tool via callback (which also sends SSE events)
+      const result = await onToolCall(toolName, params);
+
+      if (!toolsUsed.includes(toolName)) {
+        toolsUsed.push(toolName);
+      }
+
+      // Add tool result to messages so Groq can interpret it
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(result.success ? result.data : { error: result.error })
+      });
+    }
   }
 
-  return { type, symbols, tools };
+  throw new Error('Groq yanıt üretemedi');
 }
 
 // ============================================
-// LLM RESPONSE GENERATOR (Z-AI SDK)
+// Z.AI FALLBACK GENERATOR
 // ============================================
 
-async function generateLLMResponse(
+async function generateWithZAI(
   userMessage: string,
-  queryType: string,
   toolResults: Map<string, ToolResult>
 ): Promise<string> {
-  // Tool sonuçlarını hazırla
+  // Build context from tool results
   const contextData: string[] = [];
-  
+
   const priceResult = toolResults.get('get_stock_price');
   if (priceResult?.success && priceResult.data) {
     const d = priceResult.data as Record<string, unknown>;
@@ -495,7 +659,7 @@ Dönem Değişimi: ${d.priceChange}%`);
     const d = marketResult.data as Record<string, unknown>;
     const gainers = d.gainers as Array<Record<string, unknown>>;
     const losers = d.losers as Array<Record<string, unknown>>;
-    
+
     contextData.push(`📊 PİYASA TARAMASI (${d.total} hisse):
 YÜKSELENLER: ${gainers?.slice(0, 5).map((g) => `${g.code}: ${g.price}₺ (+${g.changePercent}%)`).join(', ') || 'Yok'}
 DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.changePercent}%)`).join(', ') || 'Yok'}`);
@@ -503,17 +667,17 @@ DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.chan
 
   const webResult = toolResults.get('web_search');
   if (webResult?.success && webResult.data) {
-    const results = webResult.data as Array<{ name?: string; snippet?: string }>;
+    const results = webResult.data as Array<{ name?: string; snippet?: string; title?: string; description?: string }>;
     if (Array.isArray(results) && results.length > 0) {
-      contextData.push(`🔍 WEB ARAMA: ${results.slice(0, 3).map((r) => r.name || r.snippet || '').join(' | ')}`);
+      contextData.push(`🔍 WEB ARAMA: ${results.slice(0, 3).map((r) => r.title || r.name || r.snippet || r.description || '').filter(Boolean).join(' | ')}`);
     }
   }
 
   const kapResult = toolResults.get('get_kap_data');
   if (kapResult?.success && kapResult.data) {
-    const results = kapResult.data as Array<{ name?: string; snippet?: string }>;
+    const results = kapResult.data as Array<{ name?: string; snippet?: string; title?: string; description?: string }>;
     if (Array.isArray(results) && results.length > 0) {
-      contextData.push(`📢 KAP BİLDİRİMLERİ: ${results.slice(0, 3).map((r) => r.name || r.snippet || '').join(' | ')}`);
+      contextData.push(`📢 KAP BİLDİRİMLERİ: ${results.slice(0, 3).map((r) => r.title || r.name || r.snippet || r.description || '').filter(Boolean).join(' | ')}`);
     }
   }
 
@@ -525,61 +689,35 @@ DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.chan
     }
   }
 
-  const systemPrompt = `Sen profesyonel bir BIST (Borsa İstanbul) yatırım analiz asistanısın.
-
-KURALLAR:
-1. Türkçe yanıt ver
-2. Markdown kullan (başlıklar ##, kalın **, listeler -)
-3. Emoji kullan (📊 📈 🔴 🟢 ⚠️)
-4. Asla "al/sat" tavsiyesi verme
-5. Sadece analitik yorum yap
-6. Teknik göstergeleri açıkla (RSI, SMA, Trend)
-7. Risk faktörlerini belirt
-8. Sonuna uyarı ekle: "⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir."
-
-YANIT FORMATI:
-- Kısa başlık
-- Önemli veriler (fiyat, değişim)
-- Teknik analiz yorumu
-- Risk değerlendirmesi
-- Uyarı`;
-
   const userPrompt = `Kullanıcı Sorusu: ${userMessage}
-
-Sorgu Tipi: ${queryType}
 
 VERİLER:
 ${contextData.join('\n\n')}
 
 Lütfen bu verilere dayanarak profesyonel bir analiz yap.`;
 
-  try {
-    const zai = await ZAI.create();
-    const response = await zai.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      max_tokens: 2000,
-      temperature: 0.7
-    });
+  const zai = await ZAI.create();
+  const response = await zai.chat.completions.create({
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt }
+    ],
+    max_tokens: 2000,
+    temperature: 0.7
+  });
 
-    if (response.choices?.[0]?.message?.content) {
-      return response.choices[0].message.content;
-    }
-    
-    return generateFallbackResponse(queryType, toolResults);
-  } catch (error) {
-    console.error('LLM error:', error);
-    return generateFallbackResponse(queryType, toolResults);
+  if (response.choices?.[0]?.message?.content) {
+    return response.choices[0].message.content;
   }
+
+  throw new Error('Z.AI yanıt üretemedi');
 }
 
 // ============================================
-// FALLBACK RESPONSE
+// FALLBACK RESPONSE (no LLM)
 // ============================================
 
-function generateFallbackResponse(queryType: string, toolResults: Map<string, ToolResult>): string {
+function generateFallbackResponse(toolResults: Map<string, ToolResult>): string {
   const formatNumber = (n: number) => n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   let response = '';
 
@@ -618,7 +756,7 @@ function generateFallbackResponse(queryType: string, toolResults: Map<string, To
   }
 
   response += `\n---\n⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.`;
-  return response || 'Veri bulundu.';
+  return response || 'Veri alındı ancak analiz yapılamadı.';
 }
 
 // ============================================
@@ -632,11 +770,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // Create a TransformStream for SSE
     const stream = new TransformStream();
     const writer = stream.writable.getWriter();
 
-    // Process in background
     (async () => {
       try {
         // TXT file analysis
@@ -685,7 +821,7 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        // Normal message
+        // Normal message - use Groq function calling agent
         const { message } = body;
         if (!message) {
           await writer.write(encoder.encode({ type: 'error', data: { error: 'Mesaj gerekli' } }));
@@ -693,73 +829,93 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        const { type, symbols, tools } = analyzeQuery(message);
-        const toolResults = new Map<string, ToolResult>();
-
-        // Send initial progress
         await writer.write(encoder.encode({
           type: 'progress',
-          data: { message: 'Sorgu analiz ediliyor...', tools: tools.join(', ') }
+          data: { message: '🤖 Groq AI analiz başlatıyor...' }
         }));
 
-        // Execute tools sequentially with progress updates
-        for (const tool of tools) {
-          const toolInfo = TOOLS_INFO[tool] || { name: tool, description: `${tool} çalışıyor...` };
+        // Collect tool results for Z.AI fallback
+        const toolResults = new Map<string, ToolResult>();
 
-          // Send tool start event
+        // Tool call callback - sends SSE events and executes tools
+        const onToolCall = async (toolName: string, params: Record<string, unknown>): Promise<ToolResult> => {
+          const toolInfo = TOOLS_INFO[toolName] || { name: toolName, description: `${toolName} çalışıyor...` };
+
           await writer.write(encoder.encode({
             type: 'tool_start',
-            data: { tool, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
+            data: { tool: toolName, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
           }));
 
-          // Get params for tool
-          let params: Record<string, unknown> = {};
-          switch (tool) {
-            case 'get_stock_price':
-            case 'get_stock_history':
-            case 'get_kap_data':
-              params = { symbol: symbols[0], period: '1Y' };
-              break;
-            case 'web_search':
-              params = { query: symbols.length > 0 ? `${symbols[0]} hisse analiz` : 'BIST borsa' };
-              break;
-            default:
-              params = {};
-          }
+          const result = await executeTool(toolName, params, userId);
+          toolResults.set(toolName, result);
 
-          // Execute tool
-          const result = await executeTool(tool, params, userId);
-          toolResults.set(tool, result);
-
-          // Send tool result event
           await writer.write(encoder.encode({
             type: 'tool_result',
             data: {
-              tool,
+              tool: toolName,
               status: result.success ? 'completed' : 'error',
               result: result.data,
               message: result.success ? `${toolInfo.name} tamamlandı (${result._meta?.duration}ms)` : result.error
             }
           }));
-        }
 
-        // Send LLM start event
+          return result;
+        };
+
+        // Try Groq with function calling first (PRIMARY)
         await writer.write(encoder.encode({
           type: 'llm_start',
-          data: { message: '🤖 AI analiz yapıyor...' }
+          data: { message: '🤖 Groq AI düşünüyor ve araçları çağırıyor...' }
         }));
 
-        // Generate LLM response
-        const response = await generateLLMResponse(message, type, toolResults);
+        let finalResponse = '';
+        let toolsUsed: string[] = [];
 
-        // Send complete event
+        try {
+          const groqResult = await generateWithGroq(message, userId, onToolCall);
+          finalResponse = groqResult.response;
+          toolsUsed = groqResult.toolsUsed;
+        } catch (groqError) {
+          console.error('Groq failed, falling back to Z.AI:', groqError);
+
+          // If Groq failed but we have no tool results yet, run basic tools
+          if (toolResults.size === 0) {
+            const upperMessage = message.toUpperCase();
+            const symbolMatches: string[] = upperMessage.match(/\b([A-Z]{3,5})\b/g) || [];
+            const symbols = [...new Set(symbolMatches)].filter((s) => s.length >= 3 && s.length <= 5);
+
+            if (symbols.length > 0) {
+              await onToolCall('get_stock_price', { symbol: symbols[0] });
+              await onToolCall('get_stock_history', { symbol: symbols[0], period: '1M' });
+            } else {
+              await onToolCall('scan_market', {});
+            }
+          }
+
+          // Z.AI fallback
+          await writer.write(encoder.encode({
+            type: 'llm_start',
+            data: { message: '🔄 Z.AI ile yedek analiz yapılıyor...' }
+          }));
+
+          try {
+            finalResponse = await generateWithZAI(message, toolResults);
+            toolsUsed = Array.from(toolResults.keys());
+          } catch (zaiError) {
+            console.error('Z.AI also failed, using static fallback:', zaiError);
+            finalResponse = generateFallbackResponse(toolResults);
+            toolsUsed = Array.from(toolResults.keys());
+          }
+        }
+
         await writer.write(encoder.encode({
           type: 'complete',
-          data: { response, toolsUsed: tools, queryType: type, symbols }
+          data: { response: finalResponse, toolsUsed, symbols: [] }
         }));
 
         await writer.close();
       } catch (error) {
+        console.error('Agent error:', error);
         await writer.write(encoder.encode({
           type: 'error',
           data: { error: 'İşlem sırasında hata oluştu' }
