@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { sql } from '@vercel/postgres';
+import { getPriceAlerts, createPriceAlert, deletePriceAlert } from '@/lib/db';
+import { getSupabase } from '@/lib/supabase';
 
 // Kullanıcı ID al
 async function getCurrentUserId(): Promise<string | null> {
@@ -16,22 +17,11 @@ async function getCurrentUserId(): Promise<string | null> {
 export async function GET() {
   try {
     const userId = await getCurrentUserId();
-
-    const result = userId
-      ? await sql`
-          SELECT * FROM price_alerts 
-          WHERE user_id = ${userId} AND active = true
-          ORDER BY created_at DESC
-        `
-      : await sql`
-          SELECT * FROM price_alerts 
-          WHERE user_id IS NULL AND active = true
-          ORDER BY created_at DESC
-        `;
+    const alerts = await getPriceAlerts(userId);
 
     // Güncel fiyatları ekle
     const withPrices = await Promise.all(
-      result.rows.map(async (alert) => {
+      alerts.map(async (alert) => {
         try {
           const response = await fetch(`https://api.asenax.com/bist/get/${alert.symbol}`);
           const data = await response.json();
@@ -107,25 +97,24 @@ export async function POST(request: NextRequest) {
     }
 
     // Aynı bildirim var mı kontrol et
-    const existing = userId
-      ? await sql`
-          SELECT 1 FROM price_alerts 
-          WHERE symbol = ${symbol.toUpperCase()}
-            AND target_price = ${parseFloat(targetPrice)}
-            AND condition = ${condition}
-            AND user_id = ${userId}
-            AND active = true
-        `
-      : await sql`
-          SELECT 1 FROM price_alerts 
-          WHERE symbol = ${symbol.toUpperCase()}
-            AND target_price = ${parseFloat(targetPrice)}
-            AND condition = ${condition}
-            AND user_id IS NULL
-            AND active = true
-        `;
+    const supabase = getSupabase();
+    let query = supabase
+      .from('price_alerts')
+      .select('id')
+      .eq('symbol', symbol.toUpperCase())
+      .eq('target_price', parseFloat(targetPrice))
+      .eq('condition', condition)
+      .eq('active', true);
+    
+    if (userId) {
+      query = query.eq('user_id', userId);
+    } else {
+      query = query.is('user_id', null);
+    }
 
-    if (existing.rows.length > 0) {
+    const { data: existing } = await query.limit(1);
+
+    if (existing && existing.length > 0) {
       return NextResponse.json({
         success: false,
         error: 'Bu bildirim zaten mevcut'
@@ -133,21 +122,23 @@ export async function POST(request: NextRequest) {
     }
 
     // Oluştur
-    const result = userId
-      ? await sql`
-          INSERT INTO price_alerts (symbol, target_price, condition, user_id)
-          VALUES (${symbol.toUpperCase()}, ${parseFloat(targetPrice)}, ${condition}, ${userId})
-          RETURNING *
-        `
-      : await sql`
-          INSERT INTO price_alerts (symbol, target_price, condition, user_id)
-          VALUES (${symbol.toUpperCase()}, ${parseFloat(targetPrice)}, ${condition}, NULL)
-          RETURNING *
-        `;
+    const result = await createPriceAlert(
+      symbol.toUpperCase(),
+      parseFloat(targetPrice),
+      condition,
+      userId
+    );
+
+    if (!result) {
+      return NextResponse.json({
+        success: false,
+        error: 'Oluşturulamadı'
+      });
+    }
 
     return NextResponse.json({
       success: true,
-      data: result.rows[0],
+      data: result,
       message: `${symbol.toUpperCase()} için ${targetPrice} ₺ ${condition === 'above' ? 'üzerine çıkınca' : 'altına inince'} bildirim oluşturuldu`
     });
   } catch (error) {
@@ -172,16 +163,13 @@ export async function DELETE(request: NextRequest) {
       });
     }
 
-    if (userId) {
-      await sql`
-        DELETE FROM price_alerts 
-        WHERE id = ${id} AND user_id = ${userId}
-      `;
-    } else {
-      await sql`
-        DELETE FROM price_alerts 
-        WHERE id = ${id} AND user_id IS NULL
-      `;
+    const success = await deletePriceAlert(id, userId);
+
+    if (!success) {
+      return NextResponse.json({
+        success: false,
+        error: 'Silinemedi'
+      });
     }
 
     return NextResponse.json({
@@ -211,34 +199,29 @@ export async function PATCH(request: NextRequest) {
       });
     }
 
+    const supabase = getSupabase();
+    let query = supabase
+      .from('price_alerts')
+      .update(
+        triggered
+          ? { active: false, triggered: true, triggered_at: new Date().toISOString() }
+          : { active: active ?? true }
+      )
+      .eq('id', id);
+
     if (userId) {
-      if (triggered) {
-        await sql`
-          UPDATE price_alerts 
-          SET active = false, triggered = true, triggered_at = NOW()
-          WHERE id = ${id} AND user_id = ${userId}
-        `;
-      } else {
-        await sql`
-          UPDATE price_alerts 
-          SET active = ${active ?? true}
-          WHERE id = ${id} AND user_id = ${userId}
-        `;
-      }
+      query = query.eq('user_id', userId);
     } else {
-      if (triggered) {
-        await sql`
-          UPDATE price_alerts 
-          SET active = false, triggered = true, triggered_at = NOW()
-          WHERE id = ${id} AND user_id IS NULL
-        `;
-      } else {
-        await sql`
-          UPDATE price_alerts 
-          SET active = ${active ?? true}
-          WHERE id = ${id} AND user_id IS NULL
-        `;
-      }
+      query = query.is('user_id', null);
+    }
+
+    const { error } = await query;
+
+    if (error) {
+      return NextResponse.json({
+        success: false,
+        error: 'Güncellenemedi'
+      });
     }
 
     return NextResponse.json({

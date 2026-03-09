@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
-import { sql } from '@vercel/postgres';
+import { getSupabase } from '@/lib/supabase';
 import ZAI from 'z-ai-web-dev-sdk';
 
 // ============================================
@@ -210,11 +210,19 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
 async function getWatchlist(userId: string | null): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const result = userId
-      ? await sql`SELECT * FROM watchlist WHERE user_id = ${userId} ORDER BY created_at DESC`
-      : await sql`SELECT * FROM watchlist WHERE user_id IS NULL ORDER BY created_at DESC`;
+    const supabase = getSupabase();
+    let query = supabase.from('watchlist').select('*').order('created_at', { ascending: false });
+    
+    if (userId) {
+      query = query.eq('user_id', userId);
+    } else {
+      query = query.is('user_id', null);
+    }
+    
+    const { data, error } = await query;
 
-    return { success: true, data: result.rows, _meta: { tool: 'get_watchlist', duration: Date.now() - startTime } };
+    if (error) throw error;
+    return { success: true, data: data || [], _meta: { tool: 'get_watchlist', duration: Date.now() - startTime } };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'get_watchlist', duration: Date.now() - startTime } };
   }
@@ -223,21 +231,15 @@ async function getWatchlist(userId: string | null): Promise<ToolResult> {
 async function addToWatchlist(symbol: string, name: string, userId: string | null): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const result = userId
-      ? await sql`
-          INSERT INTO watchlist (symbol, name, user_id)
-          VALUES (${symbol.toUpperCase()}, ${name}, ${userId})
-          ON CONFLICT DO NOTHING
-          RETURNING *
-        `
-      : await sql`
-          INSERT INTO watchlist (symbol, name, user_id)
-          VALUES (${symbol.toUpperCase()}, ${name}, NULL)
-          ON CONFLICT DO NOTHING
-          RETURNING *
-        `;
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from('watchlist')
+      .insert({ symbol: symbol.toUpperCase(), name, user_id: userId })
+      .select()
+      .single();
 
-    return { success: true, data: result.rows[0], _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
+    if (error && error.code !== '23505') throw error; // 23505 = duplicate key
+    return { success: true, data, _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
   }
@@ -246,11 +248,17 @@ async function addToWatchlist(symbol: string, name: string, userId: string | nul
 async function removeFromWatchlist(symbol: string, userId: string | null): Promise<ToolResult> {
   const startTime = Date.now();
   try {
+    const supabase = getSupabase();
+    let query = supabase.from('watchlist').delete().eq('symbol', symbol.toUpperCase());
+    
     if (userId) {
-      await sql`DELETE FROM watchlist WHERE symbol = ${symbol.toUpperCase()} AND user_id = ${userId}`;
+      query = query.eq('user_id', userId);
     } else {
-      await sql`DELETE FROM watchlist WHERE symbol = ${symbol.toUpperCase()} AND user_id IS NULL`;
+      query = query.is('user_id', null);
     }
+    
+    const { error } = await query;
+    if (error) throw error;
     return { success: true, _meta: { tool: 'remove_from_watchlist', duration: Date.now() - startTime } };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'remove_from_watchlist', duration: Date.now() - startTime } };

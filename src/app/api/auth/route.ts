@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { createUser, getUserByRumuz, getUserStats } from '@/lib/db';
-import crypto from 'crypto';
+import { createUser, getUserByRumuz, getUserById, getUserStats } from '@/lib/db';
 
 // GET - Mevcut kullanıcıyı getir
 export async function GET() {
@@ -17,12 +16,7 @@ export async function GET() {
     }
 
     // Kullanıcıyı getir
-    const { sql } = await import('@vercel/postgres');
-    const result = await sql`
-      SELECT * FROM users WHERE id = ${userId}
-    `;
-
-    const user = result.rows[0];
+    const user = await getUserById(userId);
 
     if (!user) {
       const cookieStore = await cookies();
@@ -87,6 +81,13 @@ export async function POST(request: NextRequest) {
       const avatar = colors[Math.floor(Math.random() * colors.length)];
 
       const user = await createUser(cleanRumuz, avatar);
+
+      if (!user) {
+        return NextResponse.json({
+          success: false,
+          error: 'Kayıt oluşturulamadı'
+        });
+      }
 
       // Cookie set (7 gün)
       const cookieStore = await cookies();

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { sql } from '@vercel/postgres';
+import { getWatchlist, addToWatchlist, removeFromWatchlist, isInWatchlist } from '@/lib/db';
 
 // Kullanıcı ID al
 async function getCurrentUserId(): Promise<string | null> {
@@ -16,22 +16,11 @@ async function getCurrentUserId(): Promise<string | null> {
 export async function GET() {
   try {
     const userId = await getCurrentUserId();
-
-    const result = userId
-      ? await sql`
-          SELECT * FROM watchlist 
-          WHERE user_id = ${userId}
-          ORDER BY created_at DESC
-        `
-      : await sql`
-          SELECT * FROM watchlist 
-          WHERE user_id IS NULL
-          ORDER BY created_at DESC
-        `;
+    const items = await getWatchlist(userId);
 
     // Fiyatları ekle
     const withPrices = await Promise.all(
-      result.rows.map(async (item) => {
+      items.map(async (item) => {
         try {
           const response = await fetch(`https://api.asenax.com/bist/get/${item.symbol}`);
           const data = await response.json();
@@ -82,17 +71,9 @@ export async function POST(request: NextRequest) {
     const upperSymbol = symbol.toUpperCase();
 
     // Zaten var mı kontrol et
-    const existing = userId
-      ? await sql`
-          SELECT 1 FROM watchlist 
-          WHERE symbol = ${upperSymbol} AND user_id = ${userId}
-        `
-      : await sql`
-          SELECT 1 FROM watchlist 
-          WHERE symbol = ${upperSymbol} AND user_id IS NULL
-        `;
+    const existing = await isInWatchlist(upperSymbol, userId);
 
-    if (existing.rows.length > 0) {
+    if (existing) {
       return NextResponse.json({
         success: false,
         error: 'Bu hisse zaten takip listesinde'
@@ -114,21 +95,18 @@ export async function POST(request: NextRequest) {
     }
 
     // Ekle
-    const result = userId
-      ? await sql`
-          INSERT INTO watchlist (symbol, name, user_id)
-          VALUES (${upperSymbol}, ${stockName || upperSymbol}, ${userId})
-          RETURNING *
-        `
-      : await sql`
-          INSERT INTO watchlist (symbol, name, user_id)
-          VALUES (${upperSymbol}, ${stockName || upperSymbol}, NULL)
-          RETURNING *
-        `;
+    const result = await addToWatchlist(upperSymbol, stockName || upperSymbol, userId);
+
+    if (!result) {
+      return NextResponse.json({
+        success: false,
+        error: 'Eklenemedi'
+      });
+    }
 
     return NextResponse.json({
       success: true,
-      data: result.rows[0],
+      data: result,
       message: `${upperSymbol} takip listesine eklendi`
     });
   } catch (error) {
@@ -154,17 +132,13 @@ export async function DELETE(request: NextRequest) {
     }
 
     const upperSymbol = symbol.toUpperCase();
+    const success = await removeFromWatchlist(upperSymbol, userId);
 
-    if (userId) {
-      await sql`
-        DELETE FROM watchlist 
-        WHERE symbol = ${upperSymbol} AND user_id = ${userId}
-      `;
-    } else {
-      await sql`
-        DELETE FROM watchlist 
-        WHERE symbol = ${upperSymbol} AND user_id IS NULL
-      `;
+    if (!success) {
+      return NextResponse.json({
+        success: false,
+        error: 'Kaldırılamadı'
+      });
     }
 
     return NextResponse.json({
