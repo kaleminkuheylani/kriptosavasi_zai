@@ -44,7 +44,7 @@ const TOOLS_INFO: Record<string, { name: string; description: string }> = {
   remove_from_watchlist: { name: 'Takipten Çık', description: 'Hisse takipten çıkarılıyor...' },
   web_search: { name: 'Web Araması', description: 'Web\'de arama yapılıyor...' },
   get_kap_data: { name: 'KAP Verileri', description: 'KAP bildirimleri alınıyor...' },
-  scan_market: { name: 'Piyasa Tarama', description: 'Piyasa taranıyor...' },
+  get_news: { name: 'Haberler', description: 'Finansal haberler alınıyor...' },
   analyze_chart_image: { name: 'Grafik Analizi', description: 'Grafik analiz ediliyor...' },
   read_txt_file: { name: 'TXT Analizi', description: 'Dosya analiz ediliyor...' },
 };
@@ -289,47 +289,66 @@ async function getKapData(symbol?: string): Promise<ToolResult> {
   }
 }
 
-async function scanMarket(): Promise<ToolResult> {
+async function getNews(symbol?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const listResponse = await fetch('https://api.asenax.com/bist/list');
-    const listData = await listResponse.json();
-
-    if (listData.code !== "0") {
-      return { success: false, error: 'Liste alınamadı', _meta: { tool: 'scan_market', duration: Date.now() - startTime } };
-    }
-
-    const stocks = listData.data.filter((item: { tip?: string }) => item.tip === "Hisse").slice(0, 50);
-
-    const results = [];
-    for (let i = 0; i < stocks.length; i += 10) {
-      const batch = stocks.slice(i, i + 10);
-      const batchResults = await Promise.all(
-        batch.map(async (stock: { kod?: string; ad?: string }) => {
-          const priceData = await getStockPrice(stock.kod || '');
-          if (priceData.success && priceData.data) {
-            return { code: stock.kod, name: stock.ad, ...priceData.data };
+    const zai = await ZAI.create();
+    
+    // BIST haber kaynaklarından arama
+    const queries = symbol 
+      ? [
+          `${symbol} hisse haberi son dakika`,
+          `${symbol} borsa analizi yorum`,
+          `KAP ${symbol} bildirim`
+        ]
+      : [
+          'BIST 100 borsa haberi bugün',
+          'Türkiye borsa son dakika',
+          'BIST piyasa analizi'
+        ];
+    
+    // Paralel arama
+    const searchPromises = queries.map(q => 
+      zai.functions.invoke('web_search', { query: q, num: 5 })
+    );
+    
+    const results = await Promise.all(searchPromises);
+    
+    // Sonuçları birleştir ve tekrarları kaldır
+    const allNews: Array<{ title: string; summary: string; source: string; url: string; date?: string }> = [];
+    const seen = new Set<string>();
+    
+    for (const result of results) {
+      if (Array.isArray(result)) {
+        for (const item of result) {
+          const title = item.name || item.title || '';
+          if (title && !seen.has(title)) {
+            seen.add(title);
+            allNews.push({
+              title,
+              summary: item.snippet || item.description || '',
+              source: item.host_name || 'BIST',
+              url: item.url || '',
+              date: item.date
+            });
           }
-          return null;
-        })
-      );
-      results.push(...batchResults.filter(Boolean));
+        }
+      }
     }
-
-    const sorted = results.sort((a: { changePercent: number }, b: { changePercent: number }) => b.changePercent - a.changePercent);
-
-    return {
-      success: true,
+    
+    // Son 10 haberi döndür
+    return { 
+      success: true, 
       data: {
-        all: sorted,
-        gainers: sorted.filter((s: { changePercent: number }) => s.changePercent > 0).slice(0, 10),
-        losers: sorted.filter((s: { changePercent: number }) => s.changePercent < 0).sort((a: { changePercent: number }, b: { changePercent: number }) => a.changePercent - b.changePercent).slice(0, 10),
-        total: sorted.length
-      },
-      _meta: { tool: 'scan_market', duration: Date.now() - startTime }
+        symbol: symbol || 'BIST 100',
+        news: allNews.slice(0, 10),
+        total: allNews.length,
+        timestamp: new Date().toISOString()
+      }, 
+      _meta: { tool: 'get_news', duration: Date.now() - startTime } 
     };
   } catch (error) {
-    return { success: false, error: String(error), _meta: { tool: 'scan_market', duration: Date.now() - startTime } };
+    return { success: false, error: String(error), _meta: { tool: 'get_news', duration: Date.now() - startTime } };
   }
 }
 
@@ -400,8 +419,8 @@ async function executeTool(toolName: string, params: Record<string, unknown>, us
       return webSearch(params.query as string);
     case 'get_kap_data':
       return getKapData(params.symbol as string | undefined);
-    case 'scan_market':
-      return scanMarket();
+    case 'get_news':
+      return getNews(params.symbol as string | undefined);
     case 'analyze_chart_image':
       return analyzeChartImage(params.imageBase64 as string, params.symbol as string | undefined);
     case 'read_txt_file':
@@ -422,32 +441,29 @@ function analyzeQuery(message: string): { type: string; symbols: string[]; tools
   let type = 'general';
   let tools: string[] = [];
 
-  if (/(tahmin|gelecek|ne olur|kaç olur|gün sonra)/i.test(message)) {
+  if (/(haber|son dakika|duyuru|gelişme)/i.test(message)) {
+    type = 'news';
+    tools = ['get_news'];
+  } else if (/(tahmin|gelecek|ne olur|kaç olur|gün sonra)/i.test(message)) {
     type = 'price_prediction';
-    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search'];
+    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'get_news'];
   } else if (/satmalı|satsam|satayım/i.test(message)) {
     type = 'sell_decision';
-    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search'];
+    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'get_news'];
   } else if (/nereye|yatırım|öneri|hangi hisse/i.test(message)) {
     type = 'market_overview';
-    tools = ['scan_market'];
+    tools = ['get_news'];
   } else if (/analiz|incele|detay/i.test(message)) {
     type = 'analysis';
-    tools = symbols.length > 0 ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search'] : ['scan_market'];
-  } else if (/yükselen|kazandıran/i.test(message)) {
-    type = 'gainers';
-    tools = ['scan_market'];
-  } else if (/düşen|kaybettiren/i.test(message)) {
-    type = 'losers';
-    tools = ['scan_market'];
+    tools = symbols.length > 0 ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'get_news'] : ['get_news'];
   } else if (/takip|listem|watchlist/i.test(message)) {
     type = 'watchlist';
     tools = ['get_watchlist'];
   } else if (symbols.length > 0) {
     type = 'stock_price';
-    tools = ['get_stock_price', 'get_stock_history'];
+    tools = ['get_stock_price', 'get_stock_history', 'get_news'];
   } else {
-    tools = ['scan_market'];
+    tools = ['get_news'];
   }
 
   return { type, symbols, tools };
@@ -514,6 +530,15 @@ DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.chan
     const results = kapResult.data as Array<{ name?: string; snippet?: string }>;
     if (Array.isArray(results) && results.length > 0) {
       contextData.push(`📢 KAP BİLDİRİMLERİ: ${results.slice(0, 3).map((r) => r.name || r.snippet || '').join(' | ')}`);
+    }
+  }
+
+  const newsResult = toolResults.get('get_news');
+  if (newsResult?.success && newsResult.data) {
+    const data = newsResult.data as { news?: Array<{ title: string; summary: string; source: string }> };
+    if (data.news && data.news.length > 0) {
+      contextData.push(`📰 HABERLER (${data.news.length} adet):
+${data.news.slice(0, 5).map((n, i) => `${i + 1}. ${n.title} (${n.source})`).join('\n')}`);
     }
   }
 
@@ -689,6 +714,60 @@ export async function POST(request: NextRequest) {
         const { message } = body;
         if (!message) {
           await writer.write(encoder.encode({ type: 'error', data: { error: 'Mesaj gerekli' } }));
+          await writer.close();
+          return;
+        }
+
+        // Auth kontrolü - kayıtsız kullanıcı sadece temel bilgileri görebilir
+        if (!userId) {
+          const upperMessage = message.toUpperCase();
+          const symbols = [...new Set(upperMessage.match(/\b([A-Z]{3,5})\b/g) || [])].filter(s => s.length >= 3 && s.length <= 5);
+          
+          // Sadece fiyat ve haber göster
+          let basicResponse = '';
+          
+          if (symbols.length > 0) {
+            // Hisse fiyatı al
+            const priceResult = await getStockPrice(symbols[0]);
+            if (priceResult.success && priceResult.data) {
+              const d = priceResult.data as { symbol: string; name: string; price: number; changePercent: number };
+              basicResponse += `## 📊 ${d.symbol} - ${d.name}\n\n`;
+              basicResponse += `**Fiyat:** ${d.price} ₺\n`;
+              basicResponse += `**Değişim:** ${d.changePercent >= 0 ? '+' : ''}${d.changePercent}%\n\n`;
+            }
+            
+            // Haber al
+            const newsResult = await getNews(symbols[0]);
+            if (newsResult.success && newsResult.data) {
+              const data = newsResult.data as { news?: Array<{ title: string; source: string }> };
+              if (data.news && data.news.length > 0) {
+                basicResponse += `## 📰 Son Haberler\n\n`;
+                data.news.slice(0, 3).forEach((n, i) => {
+                  basicResponse += `${i + 1}. ${n.title} (${n.source})\n`;
+                });
+              }
+            }
+          } else {
+            // Genel haber
+            const newsResult = await getNews();
+            if (newsResult.success && newsResult.data) {
+              const data = newsResult.data as { news?: Array<{ title: string; source: string }> };
+              basicResponse = `## 📰 BIST Güncel Haberler\n\n`;
+              if (data.news && data.news.length > 0) {
+                data.news.slice(0, 5).forEach((n, i) => {
+                  basicResponse += `${i + 1}. ${n.title} (${n.source})\n`;
+                });
+              }
+            }
+          }
+          
+          basicResponse += `\n\n---\n⚠️ **Kayıt olmadan sadece temel bilgileri görebilirsiniz.**\nDetaylı analiz ve yorum için lütfen giriş yapın.`;
+          
+          await writer.write(encoder.encode({
+            type: 'complete',
+            data: { response: basicResponse, toolsUsed: ['get_stock_price', 'get_news'], queryType: 'basic', symbols, requiresAuth: true }
+          }));
+          
           await writer.close();
           return;
         }

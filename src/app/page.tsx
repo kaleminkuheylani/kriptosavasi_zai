@@ -173,8 +173,6 @@ const TABS = [
   { id: 'dashboard', label: 'Ana Sayfa', icon: LayoutDashboard },
   { id: 'stocks', label: 'Hisseler', icon: Database },
   { id: 'watchlist', label: 'Takip Listem', icon: Star },
-  { id: 'gainers', label: 'Yükselenler', icon: TrendingUp },
-  { id: 'losers', label: 'Düşenler', icon: TrendingDown },
   { id: 'alerts', label: 'Bildirimler', icon: Bell },
 ];
 
@@ -1327,40 +1325,6 @@ export default function Home() {
                     <p className="text-slate-600 text-sm mt-2">Hisseler sayfasından hisse ekleyebilirsiniz</p>
                   </div>
                 )}
-              </div>
-            )}
-
-            {/* Gainers Tab */}
-            {activeTab === 'gainers' && (
-              <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
-                <div className="p-4 border-b border-slate-800">
-                  <h3 className="font-semibold text-white flex items-center gap-2">
-                    <TrendingUp className="h-5 w-5 text-emerald-400" />
-                    En Çok Yükselenler
-                  </h3>
-                </div>
-                <ScrollArea className="h-[calc(100vh-300px)]">
-                  {stocks.sort((a, b) => b.changePercent - a.changePercent).slice(0, 50).map((stock) => (
-                    <StockCard key={stock.code} stock={stock} />
-                  ))}
-                </ScrollArea>
-              </div>
-            )}
-
-            {/* Losers Tab */}
-            {activeTab === 'losers' && (
-              <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
-                <div className="p-4 border-b border-slate-800">
-                  <h3 className="font-semibold text-white flex items-center gap-2">
-                    <TrendingDown className="h-5 w-5 text-red-400" />
-                    En Çok Düşenler
-                  </h3>
-                </div>
-                <ScrollArea className="h-[calc(100vh-300px)]">
-                  {stocks.sort((a, b) => a.changePercent - b.changePercent).slice(0, 50).map((stock) => (
-                    <StockCard key={stock.code} stock={stock} />
-                  ))}
-                </ScrollArea>
               </div>
             )}
 
