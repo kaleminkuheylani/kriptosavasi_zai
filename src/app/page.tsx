@@ -419,7 +419,7 @@ export default function Home() {
   };
 
   // ============================================
-  // AI AGENT CHAT
+  // AI AGENT CHAT - SSE STREAMING
   // ============================================
 
   const sendToAgent = async () => {
@@ -440,55 +440,140 @@ export default function Home() {
     setChatLoading(true);
 
     try {
-      // Simulate tool progress for UX
-      const progressUpdates: ToolProgress[] = [
-        { tool: 'get_stock_price', status: 'running', message: 'Hisse fiyatı alınıyor...' },
-        { tool: 'get_stock_history', status: 'pending', message: 'Geçmiş veriler bekleniyor...' },
-        { tool: 'web_search', status: 'pending', message: 'Web araması bekleniyor...' },
-      ];
-      setToolProgress(progressUpdates);
-
       const response = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userMessage }),
       });
 
-      const data = await response.json();
+      // Check if response is SSE stream
+      const contentType = response.headers.get('Content-Type') || '';
+      
+      if (contentType.includes('text/event-stream')) {
+        // Handle SSE streaming
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let accumulatedResponse = '';
+        let toolsUsed: string[] = [];
 
-      // Update progress to completed
-      setToolProgress(prev => prev.map(p => ({
-        ...p,
-        status: 'completed' as const,
-        message: `${p.tool} tamamlandı`
-      })));
+        if (!reader) {
+          throw new Error('Stream reader not available');
+        }
 
-      if (data.success) {
-        const assistantMsg: ChatMessage = {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: data.response,
-          toolsUsed: data.toolsUsed,
-          pendingActions: data.pendingActions,
-          suggestedQuestions: data.suggestedQuestions,
-          timestamp: new Date()
-        };
-        setChatMessages(prev => [...prev, assistantMsg]);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        // Refresh watchlist if modified
-        if (data.toolsUsed?.some((t: string) => t.includes('watchlist') || t.includes('alert'))) {
-          fetchWatchlist();
-          fetchAlerts();
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const jsonStr = line.slice(6);
+                const event = JSON.parse(jsonStr);
+
+                switch (event.type) {
+                  case 'progress':
+                    // General progress update
+                    setToolProgress(prev => [
+                      { tool: 'query', status: 'running', message: event.data.message || 'İşleniyor...' },
+                      ...prev.filter(p => p.tool !== 'query')
+                    ]);
+                    break;
+
+                  case 'tool_start':
+                    // Tool started running
+                    setToolProgress(prev => {
+                      const existing = prev.find(p => p.tool === event.data.tool);
+                      if (existing) {
+                        return prev.map(p => p.tool === event.data.tool 
+                          ? { ...p, status: 'running', message: event.data.message }
+                          : p
+                        );
+                      }
+                      return [...prev, { 
+                        tool: event.data.tool, 
+                        status: 'running', 
+                        message: event.data.message 
+                      }];
+                    });
+                    break;
+
+                  case 'tool_result':
+                    // Tool completed
+                    setToolProgress(prev => prev.map(p => 
+                      p.tool === event.data.tool 
+                        ? { ...p, status: 'completed', message: event.data.message, result: event.data.result }
+                        : p
+                    ));
+                    break;
+
+                  case 'complete':
+                    // Final response
+                    accumulatedResponse = event.data.response || '';
+                    toolsUsed = event.data.toolsUsed || [];
+                    
+                    // Clear progress
+                    setToolProgress([]);
+                    
+                    // Add assistant message
+                    const assistantMsg: ChatMessage = {
+                      id: (Date.now() + 1).toString(),
+                      role: 'assistant',
+                      content: accumulatedResponse,
+                      toolsUsed: toolsUsed,
+                      timestamp: new Date()
+                    };
+                    setChatMessages(prev => [...prev, assistantMsg]);
+
+                    // Refresh watchlist if modified
+                    if (toolsUsed.some(t => t.includes('watchlist') || t.includes('alert'))) {
+                      fetchWatchlist();
+                      fetchAlerts();
+                    }
+                    break;
+
+                  case 'error':
+                    setChatMessages(prev => [...prev, {
+                      id: (Date.now() + 1).toString(),
+                      role: 'assistant',
+                      content: `Hata: ${event.data.error || 'Bir hata oluştu'}`,
+                      timestamp: new Date()
+                    }]);
+                    setToolProgress([]);
+                    break;
+                }
+              } catch {
+                // Ignore JSON parse errors
+              }
+            }
+          }
         }
       } else {
-        setChatMessages(prev => [...prev, {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: `Hata: ${data.error || 'Bir hata oluştu'}`,
-          timestamp: new Date()
-        }]);
+        // Fallback to regular JSON response
+        const data = await response.json();
+        
+        if (data.success !== false) {
+          const assistantMsg: ChatMessage = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: data.response,
+            toolsUsed: data.toolsUsed,
+            timestamp: new Date()
+          };
+          setChatMessages(prev => [...prev, assistantMsg]);
+        } else {
+          setChatMessages(prev => [...prev, {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: `Hata: ${data.error || 'Bir hata oluştu'}`,
+            timestamp: new Date()
+          }]);
+        }
       }
-    } catch {
+    } catch (error) {
+      console.error('Agent error:', error);
       setChatMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -564,7 +649,7 @@ export default function Home() {
     }]);
   };
 
-  // TXT File Upload
+  // TXT File Upload - SSE Streaming
   const handleTxtUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -581,6 +666,7 @@ export default function Home() {
       timestamp: new Date()
     }]);
     setChatLoading(true);
+    setToolProgress([{ tool: 'read_txt_file', status: 'running', message: 'Dosya analiz ediliyor...' }]);
 
     try {
       const content = await file.text();
@@ -590,64 +676,56 @@ export default function Home() {
         body: JSON.stringify({ txtContent: content, txtFilename: file.name }),
       });
 
-      const data = await response.json();
+      const contentType = response.headers.get('Content-Type') || '';
+      
+      if (contentType.includes('text/event-stream')) {
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
 
-      if (data.success) {
-        setChatMessages(prev => [...prev, {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: data.response,
-          toolsUsed: data.toolsUsed,
-          timestamp: new Date()
-        }]);
+        if (!reader) throw new Error('Stream reader not available');
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6));
+                
+                if (event.type === 'tool_start') {
+                  setToolProgress([{ tool: 'read_txt_file', status: 'running', message: event.data.message }]);
+                } else if (event.type === 'tool_result') {
+                  setToolProgress([{ tool: 'read_txt_file', status: 'completed', message: event.data.message }]);
+                } else if (event.type === 'complete') {
+                  setToolProgress([]);
+                  setChatMessages(prev => [...prev, {
+                    id: (Date.now() + 1).toString(),
+                    role: 'assistant',
+                    content: event.data.response,
+                    toolsUsed: event.data.toolsUsed,
+                    timestamp: new Date()
+                  }]);
+                } else if (event.type === 'error') {
+                  setToolProgress([]);
+                  setChatMessages(prev => [...prev, {
+                    id: (Date.now() + 1).toString(),
+                    role: 'assistant',
+                    content: `Hata: ${event.data.error}`,
+                    timestamp: new Date()
+                  }]);
+                }
+              } catch { /* ignore */ }
+            }
+          }
+        }
       } else {
-        setChatMessages(prev => [...prev, {
-          id: (Date.now() + 1).toString(),
-          role: 'assistant',
-          content: `Hata: ${data.error}`,
-          timestamp: new Date()
-        }]);
-      }
-    } catch {
-      setChatMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: 'Dosya okuma hatası.',
-        timestamp: new Date()
-      }]);
-    } finally {
-      setChatLoading(false);
-      if (txtInputRef.current) txtInputRef.current.value = '';
-    }
-  };
-
-  // Image Upload
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setChatMessages(prev => [...prev, {
-      id: Date.now().toString(),
-      role: 'user',
-      content: `📊 Grafik: ${file.name}`,
-      timestamp: new Date()
-    }]);
-    setChatLoading(true);
-
-    try {
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        const base64 = event.target?.result as string;
-
-        const response = await fetch('/api/agent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64: base64 }),
-        });
-
         const data = await response.json();
-
-        if (data.success) {
+        setToolProgress([]);
+        if (data.success !== false) {
           setChatMessages(prev => [...prev, {
             id: (Date.now() + 1).toString(),
             role: 'assistant',
@@ -663,10 +741,127 @@ export default function Home() {
             timestamp: new Date()
           }]);
         }
+      }
+    } catch {
+      setToolProgress([]);
+      setChatMessages(prev => [...prev, {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: 'Dosya okuma hatası.',
+        timestamp: new Date()
+      }]);
+    } finally {
+      setChatLoading(false);
+      if (txtInputRef.current) txtInputRef.current.value = '';
+    }
+  };
+
+  // Image Upload - SSE Streaming
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setChatMessages(prev => [...prev, {
+      id: Date.now().toString(),
+      role: 'user',
+      content: `📊 Grafik: ${file.name}`,
+      timestamp: new Date()
+    }]);
+    setChatLoading(true);
+    setToolProgress([{ tool: 'analyze_chart_image', status: 'running', message: 'Grafik analiz ediliyor...' }]);
+
+    try {
+      const fileReader = new FileReader();
+      fileReader.onload = async (event) => {
+        const base64 = event.target?.result as string;
+
+        try {
+          const response = await fetch('/api/agent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imageBase64: base64 }),
+          });
+
+          const contentType = response.headers.get('Content-Type') || '';
+          
+          if (contentType.includes('text/event-stream')) {
+            const streamReader = response.body?.getReader();
+            const decoder = new TextDecoder();
+
+            if (!streamReader) throw new Error('Stream reader not available');
+
+            while (true) {
+              const { done, value } = await streamReader.read();
+              if (done) break;
+
+              const chunk = decoder.decode(value, { stream: true });
+              const lines = chunk.split('\n');
+
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  try {
+                    const evt = JSON.parse(line.slice(6));
+                    
+                    if (evt.type === 'tool_start') {
+                      setToolProgress([{ tool: 'analyze_chart_image', status: 'running', message: evt.data.message }]);
+                    } else if (evt.type === 'tool_result') {
+                      setToolProgress([{ tool: 'analyze_chart_image', status: 'completed', message: evt.data.message }]);
+                    } else if (evt.type === 'complete') {
+                      setToolProgress([]);
+                      setChatMessages(prev => [...prev, {
+                        id: (Date.now() + 1).toString(),
+                        role: 'assistant',
+                        content: evt.data.response,
+                        toolsUsed: evt.data.toolsUsed,
+                        timestamp: new Date()
+                      }]);
+                    } else if (evt.type === 'error') {
+                      setToolProgress([]);
+                      setChatMessages(prev => [...prev, {
+                        id: (Date.now() + 1).toString(),
+                        role: 'assistant',
+                        content: `Hata: ${evt.data.error}`,
+                        timestamp: new Date()
+                      }]);
+                    }
+                  } catch { /* ignore */ }
+                }
+              }
+            }
+          } else {
+            const data = await response.json();
+            setToolProgress([]);
+            if (data.success !== false) {
+              setChatMessages(prev => [...prev, {
+                id: (Date.now() + 1).toString(),
+                role: 'assistant',
+                content: data.response,
+                toolsUsed: data.toolsUsed,
+                timestamp: new Date()
+              }]);
+            } else {
+              setChatMessages(prev => [...prev, {
+                id: (Date.now() + 1).toString(),
+                role: 'assistant',
+                content: `Hata: ${data.error}`,
+                timestamp: new Date()
+              }]);
+            }
+          }
+        } catch {
+          setToolProgress([]);
+          setChatMessages(prev => [...prev, {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: 'Analiz hatası.',
+            timestamp: new Date()
+          }]);
+        }
         setChatLoading(false);
       };
-      reader.readAsDataURL(file);
+      fileReader.readAsDataURL(file);
     } catch {
+      setToolProgress([]);
       setChatMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(),
         role: 'assistant',

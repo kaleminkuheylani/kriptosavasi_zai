@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
 import { sql } from '@vercel/postgres';
 import ZAI from 'z-ai-web-dev-sdk';
@@ -17,59 +17,36 @@ interface ToolResult {
   };
 }
 
+interface SSEMessage {
+  type: 'progress' | 'tool_start' | 'tool_result' | 'complete' | 'error';
+  data: {
+    tool?: string;
+    status?: 'pending' | 'running' | 'completed' | 'error';
+    message?: string;
+    result?: unknown;
+    response?: string;
+    toolsUsed?: string[];
+    queryType?: string;
+    symbols?: string[];
+    error?: string;
+  };
+}
+
 // ============================================
 // TOOLS DEFINITION
 // ============================================
 
-const TOOLS = {
-  get_stock_price: {
-    description: 'Hisse fiyatı ve temel verileri getirir',
-    parameters: { symbol: 'string - Hisse kodu (örn: THYAO, ASELS)' }
-  },
-  get_stock_history: {
-    description: 'Geçmiş fiyat verileri ve teknik göstergeler',
-    parameters: { symbol: 'string', period: 'string (1M, 3M, 6M, 1Y)' }
-  },
-  get_watchlist: {
-    description: 'Kullanıcının takip listesi',
-    parameters: {}
-  },
-  add_to_watchlist: {
-    description: 'Takip listesine ekle',
-    parameters: { symbol: 'string', name: 'string (opsiyonel)' }
-  },
-  remove_from_watchlist: {
-    description: 'Takip listesinden çıkar',
-    parameters: { symbol: 'string' }
-  },
-  web_search: {
-    description: 'Web araması yapar',
-    parameters: { query: 'string - Arama sorgusu' }
-  },
-  get_kap_data: {
-    description: 'KAP bildirimleri',
-    parameters: { symbol: 'string (opsiyonel)' }
-  },
-  scan_market: {
-    description: 'Piyasa taraması',
-    parameters: {}
-  },
-  get_top_gainers: {
-    description: 'En çok yükselenler',
-    parameters: { limit: 'number (varsayılan: 10)' }
-  },
-  get_top_losers: {
-    description: 'En çok düşenler',
-    parameters: { limit: 'number (varsayılan: 10)' }
-  },
-  analyze_chart_image: {
-    description: 'VLM ile grafik analizi',
-    parameters: { imageBase64: 'string', symbol: 'string (opsiyonel)' }
-  },
-  read_txt_file: {
-    description: 'TXT dosya analizi',
-    parameters: { content: 'string', filename: 'string (opsiyonel)' }
-  }
+const TOOLS_INFO: Record<string, { name: string; description: string }> = {
+  get_stock_price: { name: 'Hisse Fiyatı', description: 'Güncel fiyat verisi alınıyor...' },
+  get_stock_history: { name: 'Geçmiş Veri', description: 'Tarihsel veriler analiz ediliyor...' },
+  get_watchlist: { name: 'Takip Listesi', description: 'Takip listesi kontrol ediliyor...' },
+  add_to_watchlist: { name: 'Takibe Ekle', description: 'Hisse takibe ekleniyor...' },
+  remove_from_watchlist: { name: 'Takipten Çık', description: 'Hisse takipten çıkarılıyor...' },
+  web_search: { name: 'Web Araması', description: 'Web\'de arama yapılıyor...' },
+  get_kap_data: { name: 'KAP Verileri', description: 'KAP bildirimleri alınıyor...' },
+  scan_market: { name: 'Piyasa Tarama', description: 'Piyasa taranıyor...' },
+  analyze_chart_image: { name: 'Grafik Analizi', description: 'Grafik analiz ediliyor...' },
+  read_txt_file: { name: 'TXT Analizi', description: 'Dosya analiz ediliyor...' },
 };
 
 // ============================================
@@ -78,6 +55,19 @@ const TOOLS = {
 
 const stockPriceCache: Map<string, { data: unknown; timestamp: number }> = new Map();
 const CACHE_TTL = 60000;
+
+// ============================================
+// SSE HELPER
+// ============================================
+
+function createSSEEncoder() {
+  const encoder = new TextEncoder();
+  return {
+    encode: (message: SSEMessage) => {
+      return encoder.encode(`data: ${JSON.stringify(message)}\n\n`);
+    }
+  };
+}
 
 // ============================================
 // HELPER FUNCTIONS
@@ -178,6 +168,18 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
       const sma20 = closes.length >= 20 ? closes.slice(-20).reduce((a, b) => a + b, 0) / 20 : null;
       const sma50 = closes.length >= 50 ? closes.slice(-50).reduce((a, b) => a + b, 0) / 50 : null;
 
+      // RSI Calculation
+      let rsi: number | null = null;
+      if (closes.length >= 14) {
+        const changes = closes.slice(1).map((c, i) => c - closes[i]);
+        const gains = changes.filter(c => c > 0);
+        const losses = changes.filter(c => c < 0).map(c => Math.abs(c));
+        const avgGain = gains.length > 0 ? gains.reduce((a, b) => a + b, 0) / 14 : 0;
+        const avgLoss = losses.length > 0 ? losses.reduce((a, b) => a + b, 0) / 14 : 0;
+        const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+        rsi = 100 - (100 / (1 + rs));
+      }
+
       const firstPrice = historical[0]?.close || 0;
       const lastPrice = historical[historical.length - 1]?.close || 0;
       const priceChange = firstPrice > 0 ? ((lastPrice - firstPrice) / firstPrice * 100) : 0;
@@ -190,7 +192,8 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
           period,
           indicators: {
             sma20: sma20 ? Math.round(sma20 * 100) / 100 : null,
-            sma50: sma50 ? Math.round(sma50 * 100) / 100 : null
+            sma50: sma50 ? Math.round(sma50 * 100) / 100 : null,
+            rsi: rsi ? Math.round(rsi * 100) / 100 : null
           },
           trend: sma20 && sma50 ? (sma20 > sma50 ? 'BULLISH' : 'BEARISH') : 'NEUTRAL',
           priceChange: Math.round(priceChange * 100) / 100
@@ -413,10 +416,7 @@ async function executeTool(toolName: string, params: Record<string, unknown>, us
 
 function analyzeQuery(message: string): { type: string; symbols: string[]; tools: string[] } {
   const upperMessage = message.toUpperCase();
-  const lowerMessage = message.toLowerCase();
-
-  const symbolMatches = upperMessage.match(/\b([A-Z]{3,5})\b/g) || [];
-  const symbols = [...new Set(symbolMatches)].filter(s => s.length >= 3 && s.length <= 5);
+  const symbols = [...new Set(upperMessage.match(/\b([A-Z]{3,5})\b/g) || [])].filter(s => s.length >= 3 && s.length <= 5);
 
   let type = 'general';
   let tools: string[] = [];
@@ -471,10 +471,11 @@ function generateFallbackResponse(queryType: string, toolResults: Map<string, To
 
   const historyResult = toolResults.get('get_stock_history');
   if (historyResult?.success && historyResult.data) {
-    const d = historyResult.data as { indicators: { sma20: number | null; sma50: number | null }; trend: string; priceChange: number };
+    const d = historyResult.data as { indicators: { sma20: number | null; sma50: number | null; rsi: number | null }; trend: string; priceChange: number };
     response += `## 📈 Teknik Analiz\n\n`;
     if (d.indicators?.sma20) response += `**SMA 20:** ${formatNumber(d.indicators.sma20)} ₺\n`;
     if (d.indicators?.sma50) response += `**SMA 50:** ${formatNumber(d.indicators.sma50)} ₺\n`;
+    if (d.indicators?.rsi) response += `**RSI 14:** ${formatNumber(d.indicators.rsi)}\n`;
     response += `**Trend:** ${d.trend === 'BULLISH' ? '🟢 Yükseliş' : d.trend === 'BEARISH' ? '🔴 Düşüş' : '🟡 Yatay'}\n\n`;
   }
 
@@ -498,79 +499,158 @@ function generateFallbackResponse(queryType: string, toolResults: Map<string, To
 }
 
 // ============================================
-// MAIN API HANDLER
+// MAIN API HANDLER - SSE STREAMING
 // ============================================
 
 export async function POST(request: NextRequest) {
+  const encoder = createSSEEncoder();
+  const userId = await getCurrentUserId();
+
   try {
-    const userId = await getCurrentUserId();
     const body = await request.json();
 
-    // TXT dosya analizi
-    if (body.txtContent) {
-      const result = await readTxtFile(body.txtContent, body.txtFilename);
-      return NextResponse.json({
-        success: result.success,
-        response: result.success ? (result.data as { analysis: string }).analysis : result.error,
-        toolsUsed: ['read_txt_file']
-      });
-    }
+    // Create a TransformStream for SSE
+    const stream = new TransformStream();
+    const writer = stream.writable.getWriter();
 
-    // Grafik analizi
-    if (body.imageBase64) {
-      const result = await analyzeChartImage(body.imageBase64, body.imageSymbol);
-      return NextResponse.json({
-        success: result.success,
-        response: result.success ? (result.data as { analysis: string }).analysis : result.error,
-        toolsUsed: ['analyze_chart_image']
-      });
-    }
+    // Process in background
+    (async () => {
+      try {
+        // TXT file analysis
+        if (body.txtContent) {
+          await writer.write(encoder.encode({
+            type: 'tool_start',
+            data: { tool: 'read_txt_file', status: 'running', message: TOOLS_INFO.read_txt_file.description }
+          }));
 
-    // Normal mesaj
-    const { message } = body;
-    if (!message) {
-      return NextResponse.json({ success: false, error: 'Mesaj gerekli' });
-    }
+          const result = await readTxtFile(body.txtContent, body.txtFilename);
 
-    const { type, symbols, tools } = analyzeQuery(message);
-    const toolResults = new Map<string, ToolResult>();
+          await writer.write(encoder.encode({
+            type: 'tool_result',
+            data: { tool: 'read_txt_file', status: result.success ? 'completed' : 'error', result: result.data, message: result.success ? 'Analiz tamamlandı' : result.error }
+          }));
 
-    // Paralel tool execution
-    const toolPromises = tools.map(async (tool) => {
-      let params: Record<string, unknown> = {};
-      switch (tool) {
-        case 'get_stock_price':
-        case 'get_stock_history':
-        case 'get_kap_data':
-          params = { symbol: symbols[0], period: '1Y' };
-          break;
-        case 'web_search':
-          params = { query: symbols.length > 0 ? `${symbols[0]} hisse analiz` : 'BIST borsa' };
-          break;
-        default:
-          params = {};
+          await writer.write(encoder.encode({
+            type: 'complete',
+            data: { response: result.success ? (result.data as { analysis: string }).analysis : result.error, toolsUsed: ['read_txt_file'] }
+          }));
+
+          await writer.close();
+          return;
+        }
+
+        // Image analysis
+        if (body.imageBase64) {
+          await writer.write(encoder.encode({
+            type: 'tool_start',
+            data: { tool: 'analyze_chart_image', status: 'running', message: TOOLS_INFO.analyze_chart_image.description }
+          }));
+
+          const result = await analyzeChartImage(body.imageBase64, body.imageSymbol);
+
+          await writer.write(encoder.encode({
+            type: 'tool_result',
+            data: { tool: 'analyze_chart_image', status: result.success ? 'completed' : 'error', result: result.data, message: result.success ? 'Analiz tamamlandı' : result.error }
+          }));
+
+          await writer.write(encoder.encode({
+            type: 'complete',
+            data: { response: result.success ? (result.data as { analysis: string }).analysis : result.error, toolsUsed: ['analyze_chart_image'] }
+          }));
+
+          await writer.close();
+          return;
+        }
+
+        // Normal message
+        const { message } = body;
+        if (!message) {
+          await writer.write(encoder.encode({ type: 'error', data: { error: 'Mesaj gerekli' } }));
+          await writer.close();
+          return;
+        }
+
+        const { type, symbols, tools } = analyzeQuery(message);
+        const toolResults = new Map<string, ToolResult>();
+
+        // Send initial progress
+        await writer.write(encoder.encode({
+          type: 'progress',
+          data: { message: 'Sorgu analiz ediliyor...', tools: tools.join(', ') }
+        }));
+
+        // Execute tools sequentially with progress updates
+        for (const tool of tools) {
+          const toolInfo = TOOLS_INFO[tool] || { name: tool, description: `${tool} çalışıyor...` };
+
+          // Send tool start event
+          await writer.write(encoder.encode({
+            type: 'tool_start',
+            data: { tool, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
+          }));
+
+          // Get params for tool
+          let params: Record<string, unknown> = {};
+          switch (tool) {
+            case 'get_stock_price':
+            case 'get_stock_history':
+            case 'get_kap_data':
+              params = { symbol: symbols[0], period: '1Y' };
+              break;
+            case 'web_search':
+              params = { query: symbols.length > 0 ? `${symbols[0]} hisse analiz` : 'BIST borsa' };
+              break;
+            default:
+              params = {};
+          }
+
+          // Execute tool
+          const result = await executeTool(tool, params, userId);
+          toolResults.set(tool, result);
+
+          // Send tool result event
+          await writer.write(encoder.encode({
+            type: 'tool_result',
+            data: {
+              tool,
+              status: result.success ? 'completed' : 'error',
+              result: result.data,
+              message: result.success ? `${toolInfo.name} tamamlandı (${result._meta?.duration}ms)` : result.error
+            }
+          }));
+        }
+
+        // Generate response
+        const response = generateFallbackResponse(type, toolResults);
+
+        // Send complete event
+        await writer.write(encoder.encode({
+          type: 'complete',
+          data: { response, toolsUsed: tools, queryType: type, symbols }
+        }));
+
+        await writer.close();
+      } catch (error) {
+        await writer.write(encoder.encode({
+          type: 'error',
+          data: { error: 'İşlem sırasında hata oluştu' }
+        }));
+        await writer.close();
       }
-      const result = await executeTool(tool, params, userId);
-      return { tool, result };
-    });
+    })();
 
-    const results = await Promise.all(toolPromises);
-    for (const { tool, result } of results) {
-      toolResults.set(tool, result);
-    }
-
-    // Fallback response
-    const response = generateFallbackResponse(type, toolResults);
-
-    return NextResponse.json({
-      success: true,
-      response,
-      toolsUsed: tools,
-      queryType: type,
-      symbols
+    return new Response(stream.readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
     });
   } catch (error) {
     console.error('Agent error:', error);
-    return NextResponse.json({ success: false, error: 'Sunucu hatası' }, { status: 500 });
+    return new Response(JSON.stringify({ error: 'Sunucu hatası' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 }
