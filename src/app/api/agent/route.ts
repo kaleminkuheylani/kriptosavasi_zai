@@ -18,7 +18,7 @@ interface ToolResult {
 }
 
 interface SSEMessage {
-  type: 'progress' | 'tool_start' | 'tool_result' | 'complete' | 'error';
+  type: 'progress' | 'tool_start' | 'tool_result' | 'llm_start' | 'complete' | 'error';
   data: {
     tool?: string;
     status?: 'pending' | 'running' | 'completed' | 'error';
@@ -187,7 +187,7 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
       return {
         success: true,
         data: {
-          historical,
+          historical: historical.slice(-30), // Son 30 gün
           count: historical.length,
           period,
           indicators: {
@@ -196,7 +196,9 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
             rsi: rsi ? Math.round(rsi * 100) / 100 : null
           },
           trend: sma20 && sma50 ? (sma20 > sma50 ? 'BULLISH' : 'BEARISH') : 'NEUTRAL',
-          priceChange: Math.round(priceChange * 100) / 100
+          priceChange: Math.round(priceChange * 100) / 100,
+          lastPrice,
+          firstPrice
         },
         _meta: { tool: 'get_stock_history', duration: Date.now() - startTime }
       };
@@ -238,7 +240,7 @@ async function addToWatchlist(symbol: string, name: string, userId: string | nul
       .select()
       .single();
 
-    if (error && error.code !== '23505') throw error; // 23505 = duplicate key
+    if (error && error.code !== '23505') throw error;
     return { success: true, data, _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
@@ -440,7 +442,7 @@ function analyzeQuery(message: string): { type: string; symbols: string[]; tools
     tools = ['scan_market'];
   } else if (/analiz|incele|detay/i.test(message)) {
     type = 'analysis';
-    tools = symbols.length > 0 ? ['get_stock_price', 'get_stock_history', 'get_kap_data'] : ['scan_market'];
+    tools = symbols.length > 0 ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search'] : ['scan_market'];
   } else if (/yükselen|kazandıran/i.test(message)) {
     type = 'gainers';
     tools = ['scan_market'];
@@ -452,12 +454,161 @@ function analyzeQuery(message: string): { type: string; symbols: string[]; tools
     tools = ['get_watchlist'];
   } else if (symbols.length > 0) {
     type = 'stock_price';
-    tools = ['get_stock_price'];
+    tools = ['get_stock_price', 'get_stock_history'];
   } else {
     tools = ['scan_market'];
   }
 
   return { type, symbols, tools };
+}
+
+// ============================================
+// LLM RESPONSE GENERATOR (GROQ)
+// ============================================
+
+async function generateLLMResponse(
+  userMessage: string,
+  queryType: string,
+  toolResults: Map<string, ToolResult>
+): Promise<string> {
+  const groqApiKey = process.env.GROQ_API_KEY;
+  
+  // Fallback: Groq key yoksa basit response
+  if (!groqApiKey) {
+    return generateFallbackResponse(queryType, toolResults);
+  }
+
+  // Tool sonuçlarını hazırla
+  const contextData: string[] = [];
+  
+  const priceResult = toolResults.get('get_stock_price');
+  if (priceResult?.success && priceResult.data) {
+    const d = priceResult.data as Record<string, unknown>;
+    contextData.push(`HİSSE FİYAT BİLGİSİ:
+- Sembol: ${d.symbol}
+- Ad: ${d.name}
+- Güncel Fiyat: ${d.price} ₺
+- Değişim: ${d.change} ₺ (${d.changePercent}%)
+- Günlük Yüksek: ${d.high} ₺
+- Günlük Düşük: ${d.low} ₺
+- Açılış: ${d.open} ₺
+- Önceki Kapanış: ${d.previousClose} ₺
+- Tavan: ${d.ceiling} ₺
+- Taban: ${d.floor} ₺
+- Hacim: ${d.volume} lot`);
+  }
+
+  const historyResult = toolResults.get('get_stock_history');
+  if (historyResult?.success && historyResult.data) {
+    const d = historyResult.data as Record<string, unknown>;
+    const indicators = d.indicators as Record<string, number | null>;
+    contextData.push(`TEKNİK ANALİZ VERİLERİ:
+- SMA 20: ${indicators?.sma20 || 'N/A'} ₺
+- SMA 50: ${indicators?.sma50 || 'N/A'} ₺
+- RSI 14: ${indicators?.rsi || 'N/A'}
+- Trend: ${d.trend === 'BULLISH' ? 'Yükseliş Trendi' : d.trend === 'BEARISH' ? 'Düşüş Trendi' : 'Yatay'}
+- Dönem Değişimi: ${d.priceChange}%`);
+  }
+
+  const marketResult = toolResults.get('scan_market');
+  if (marketResult?.success && marketResult.data) {
+    const d = marketResult.data as Record<string, unknown>;
+    const gainers = d.gainers as Array<Record<string, unknown>>;
+    const losers = d.losers as Array<Record<string, unknown>>;
+    
+    contextData.push(`PİYASA ÖZETİ (${d.total} hisse tarandı):
+EN ÇOK YÜKSELENLER:
+${gainers?.slice(0, 5).map((g, i) => `${i + 1}. ${g.code}: ${g.price} ₺ (+${g.changePercent}%)`).join('\n') || 'Veri yok'}
+
+EN ÇOK DÜŞENLER:
+${losers?.slice(0, 5).map((l, i) => `${i + 1}. ${l.code}: ${l.price} ₺ (${l.changePercent}%)`).join('\n') || 'Veri yok'}`);
+  }
+
+  const webResult = toolResults.get('web_search');
+  if (webResult?.success && webResult.data) {
+    const results = webResult.data as Array<{ name?: string; snippet?: string; url?: string }>;
+    if (Array.isArray(results)) {
+      contextData.push(`WEB ARAMA SONUÇLARI:
+${results.slice(0, 3).map((r, i) => `${i + 1}. ${r.name || 'Başlık yok'}\n   ${r.snippet || 'Özet yok'}`).join('\n\n')}`);
+    }
+  }
+
+  const kapResult = toolResults.get('get_kap_data');
+  if (kapResult?.success && kapResult.data) {
+    const results = kapResult.data as Array<{ name?: string; snippet?: string }>;
+    if (Array.isArray(results)) {
+      contextData.push(`KAP BİLDİRİMLERİ:
+${results.slice(0, 3).map((r, i) => `${i + 1}. ${r.name || 'Başlık yok'}\n   ${r.snippet || 'Özet yok'}`).join('\n\n')}`);
+    }
+  }
+
+  const watchlistResult = toolResults.get('get_watchlist');
+  if (watchlistResult?.success && watchlistResult.data) {
+    const items = watchlistResult.data as Array<{ symbol: string; name?: string }>;
+    if (Array.isArray(items) && items.length > 0) {
+      contextData.push(`TAKİP LİSTESİ:
+${items.map((item, i) => `${i + 1}. ${item.symbol} - ${item.name || 'İsimsiz'}`).join('\n')}`);
+    }
+  }
+
+  // System prompt
+  const systemPrompt = `Sen profesyonel bir BIST (Borsa İstanbul) yatırım analiz asistanısın. Türkçe yanıt ver.
+
+Görevin:
+1. Kullanıcının sorusunu anla
+2. Sağlanan verileri analiz et
+3. Profesyonel, net ve yatırım tavsiyesi içermeyen analiz yap
+
+Önemli Kurallar:
+- Asla "şu hisseyi al/sat" şeklinde tavsiye verme
+- Sadece analitik yorumlar yap
+- Teknik göstergeleri (SMA, RSI, Trend) açıkla
+- Risk faktörlerini belirt
+- "Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir" uyarısını sonuna ekle
+
+Yanıt Formatı:
+- Markdown kullan (başlıklar, kalın, liste)
+- Emoji kullan (📊, 📈, 🔴, 🟢, ⚠️)
+- Kısa ve öz paragraflar`;
+
+  const userPrompt = `Kullanıcı Sorusu: ${userMessage}
+
+Sorgu Tipi: ${queryType}
+
+TOOL VERİLERİ:
+${contextData.join('\n\n---\n\n')}
+
+Lütfen bu verileri kullanarak kullanıcının sorusuna profesyonel bir analiz yap.`;
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${groqApiKey}`
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        max_tokens: 2000,
+        temperature: 0.7
+      })
+    });
+
+    const data = await response.json();
+    
+    if (data.choices?.[0]?.message?.content) {
+      return data.choices[0].message.content;
+    }
+    
+    return generateFallbackResponse(queryType, toolResults);
+  } catch (error) {
+    console.error('LLM error:', error);
+    return generateFallbackResponse(queryType, toolResults);
+  }
 }
 
 // ============================================
@@ -628,8 +779,14 @@ export async function POST(request: NextRequest) {
           }));
         }
 
-        // Generate response
-        const response = generateFallbackResponse(type, toolResults);
+        // Send LLM start event
+        await writer.write(encoder.encode({
+          type: 'llm_start',
+          data: { message: '🤖 Groq AI analiz yapıyor...' }
+        }));
+
+        // Generate LLM response
+        const response = await generateLLMResponse(message, type, toolResults);
 
         // Send complete event
         await writer.write(encoder.encode({

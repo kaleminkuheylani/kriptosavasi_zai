@@ -509,6 +509,14 @@ export default function Home() {
                     ));
                     break;
 
+                  case 'llm_start':
+                    // LLM analysis started
+                    setToolProgress(prev => [
+                      { tool: 'llm', status: 'running', message: event.data.message || 'AI analiz yapıyor...' },
+                      ...prev.filter(p => p.tool !== 'llm')
+                    ]);
+                    break;
+
                   case 'complete':
                     // Final response
                     accumulatedResponse = event.data.response || '';
