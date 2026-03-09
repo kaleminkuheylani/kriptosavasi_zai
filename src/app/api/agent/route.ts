@@ -4,6 +4,17 @@ import { getSupabase } from '@/lib/supabase';
 import Groq from 'groq-sdk';
 import ZAI from 'z-ai-web-dev-sdk';
 
+// Z.AI istemcisi: önce env vars, sonra config dosyası
+async function createZaiClient(): Promise<ZAI> {
+  const baseUrl = process.env.ZAI_BASE_URL;
+  const apiKey = process.env.ZAI_API_KEY;
+  if (baseUrl && apiKey) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new (ZAI as any)({ baseUrl, apiKey }) as ZAI;
+  }
+  return await ZAI.create(); // config dosyasından oku (local dev)
+}
+
 // ============================================
 // TYPES & INTERFACES
 // ============================================
@@ -375,7 +386,7 @@ async function removeFromWatchlist(symbol: string, userId: string | null): Promi
 async function webSearch(query: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
+    const zai = await createZaiClient();
     const results = await zai.functions.invoke('web_search', { query, num: 5 });
     return { success: true, data: results, _meta: { tool: 'web_search', duration: Date.now() - startTime } };
   } catch (error) {
@@ -386,7 +397,7 @@ async function webSearch(query: string): Promise<ToolResult> {
 async function getKapData(symbol?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
+    const zai = await createZaiClient();
     const query = symbol ? `${symbol} hisse KAP bildirim` : 'BIST KAP bildirim bugün';
     const results = await zai.functions.invoke('web_search', { query, num: 10 });
     return { success: true, data: results, _meta: { tool: 'get_kap_data', duration: Date.now() - startTime } };
@@ -442,8 +453,9 @@ async function scanMarket(): Promise<ToolResult> {
 async function analyzeChartImage(imageBase64: string, symbol?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
+    const zai = await createZaiClient();
     const response = await zai.chat.completions.createVision({
+      model: process.env.ZAI_VISION_MODEL || 'gpt-4o',
       messages: [{
         role: 'user',
         content: [
@@ -467,7 +479,7 @@ async function analyzeChartImage(imageBase64: string, symbol?: string): Promise<
 async function readTxtFile(content: string, filename?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
+    const zai = await createZaiClient();
     const response = await zai.chat.completions.create({
       messages: [
         { role: 'system', content: 'Sen finansal analiz asistanısın. TXT dosyasını analiz et.' },
@@ -696,7 +708,7 @@ ${contextData.join('\n\n')}
 
 Lütfen bu verilere dayanarak profesyonel bir analiz yap.`;
 
-  const zai = await ZAI.create();
+  const zai = await createZaiClient();
   const response = await zai.chat.completions.create({
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
