@@ -1,0 +1,18 @@
+{
+  "code": 200,
+  "data": {
+    "description": "",
+    "html": "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\"># BIST 100 AI Finans Asistani\n\nBIST 100 hisse senetleri icin yapay zeka destekli finansal analiz platformu.\n\n## Ozellikler\n\n### Hisse Senedi Analizi\n- Canli BIST 100 hisse fiyatlari\n- Gecmis fiyat verileri ve grafikler\n- Teknik analiz gostergeleri (SMA, trend)\n- AI destekli grafik analizi (VLM)\n\n### AI Finans Asistani\n- 15 farkli AI araci\n- Hisse fiyati sorgulama\n- Piyasa tarama\n- KAP bildirimleri\n- Web aramasi\n- TXT dosya analizi\n- Grafik resim analizi\n\n### Kullanici Sistemi\n- Rumuz ile kayit/giris (sifresiz)\n- Kisisel takip listesi\n- Fiyat bildirimleri\n- 7 gunluk oturum\n\n### Veri Kaynaklari\n- Asenax API (canli hisse verileri)\n- Finance API (gecmis veriler)\n- Groq API (LLM)\n- z-ai-web-dev-sdk (VLM, web arama)\n\n## Teknoloji Yigini\n\n- Next.js 16 (App Router)\n- TypeScript 5\n- Tailwind CSS 4\n- shadcn/ui\n- Prisma ORM + SQLite\n- Recharts (grafikler)\n- z-ai-web-dev-sdk\n\n## Kurulum\n\n```bash\n# Bagimliliklari yukle\nbun install\n\n# Veritabani olustur\nbun run db:push\n\n# Gelistirme sunucusunu baslat\nbun run dev\n```\n\nUygulama http://localhost:3000 adresinde calisacaktir.\n\n## API Endpointleri\n\n| Endpoint | Method | Aciklama |\n|----------|--------|----------|\n| /api/stocks | GET | Tum hisseleri listele |\n| /api/stocks/[symbol] | GET | Hisse detayi ve grafik |\n| /api/auth | GET/POST/DELETE | Kullanici islemleri |\n| /api/watchlist | CRUD | Takip listesi |\n| /api/alerts | CRUD | Fiyat bildirimleri |\n| /api/agent | POST | AI Agent |\n\n## AI Agent Araclari\n\n1. get_stock_price - Hisse fiyati\n2. get_stock_history - Gecmis veriler\n3. get_watchlist - Takip listesi\n4. add_to_watchlist - Listeye ekle\n5. remove_from_watchlist - Listeden kaldir\n6. web_search - Web aramasi\n7. read_document - Dokuman okuma\n8. read_txt_file - TXT analizi\n9. get_kap_data - KAP bildirimleri\n10. scan_market - Piyasa tarama\n11. get_top_gainers - Yukselenler\n12. get_top_losers - Dusenler\n13. get_price_alerts - Bildirimler\n14. create_price_alert - Bildirim olustur\n15. analyze_chart_image - Grafik analizi\n\n## Proje Yapisi\n\n```\nsrc/\n├── app/\n│   ├── api/\n│   │   ├── agent/route.ts      # AI Agent\n│   │   ├── auth/route.ts       # Kimlik dogrulama\n│   │   ├── alerts/route.ts     # Bildirimler\n│   │   ├── watchlist/route.ts  # Takip listesi\n│   │   └── stocks/             # Hisse verileri\n│   └── page.tsx                # Ana sayfa\n├── components/ui/              # shadcn/ui bilesenleri\n├── hooks/                      # React hooklari\n└── lib/                        # Yardimci fonksiyonlar\n\nprisma/\n└── schema.prisma               # Veritabani semasi\n```\n\n## Ortam Degiskenleri\n\n.env dosyasinda:\n```\nDATABASE_URL=\"file:./db/custom.db\"\nGROQ_API_KEY=\"your-groq-api-key\"\n```\n\n## Lisans\n\nMIT\n</pre></body></html>",
+    "title": "",
+    "url": "https://raw.githubusercontent.com/kaleminkuheylani/kriptosavasi_gemini/main/README.md",
+    "usage": {
+      "tokens": 974
+    }
+  },
+  "meta": {
+    "usage": {
+      "tokens": 974
+    }
+  },
+  "status": 20000
+}
