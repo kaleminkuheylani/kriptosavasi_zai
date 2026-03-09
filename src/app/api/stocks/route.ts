@@ -46,7 +46,7 @@ async function fetchStocksFromAPI(): Promise<{ success: boolean; data?: StockDat
     const results: StockData[] = [];
     const batchSize = 20;
 
-    for (let i = 0; i < Math.min(stocks.length, 150); i += batchSize) {
+    for (let i = 0; i < Math.min(stocks.length, 1000); i += batchSize) {
       const batch = stocks.slice(i, i + batchSize);
 
       const batchResults = await Promise.all(

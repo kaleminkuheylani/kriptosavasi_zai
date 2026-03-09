@@ -29,7 +29,7 @@ async function fetchMarketData() {
 
     const stocks = listData.data
       .filter((item: { tip?: string }) => item.tip === "Hisse")
-      .slice(0, 100)
+      .slice(0, 1000)
       .map((item: { kod?: string; ad?: string }) => ({
         code: item.kod || '',
         name: item.ad || ''
