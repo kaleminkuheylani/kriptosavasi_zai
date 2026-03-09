@@ -4,5 +4,10 @@
   "devCommand": "next dev",
   "installCommand": "bun install",
   "framework": "nextjs",
-  "regions": ["fra1"]
+  "regions": ["fra1"],
+  "functions": {
+    "src/app/api/agent/route.ts": {
+      "maxDuration": 60
+    }
+  }
 }

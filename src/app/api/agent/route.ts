@@ -61,111 +61,6 @@ const TOOLS_INFO: Record<string, { name: string; description: string }> = {
   read_txt_file: { name: 'TXT Analizi', description: 'Dosya analiz ediliyor...' },
 };
 
-// Groq tool definitions (OpenAI-compatible function calling format)
-const GROQ_TOOL_DEFINITIONS: Groq.Chat.Completions.ChatCompletionTool[] = [
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_price',
-      description: 'BIST hissesinin güncel fiyat bilgisini al (fiyat, değişim, hacim, tavan/taban)',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Hisse sembolü (örn: THYAO, GARAN, ASELS)' }
-        },
-        required: ['symbol']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_history',
-      description: 'Hisse geçmiş fiyat verisi ve teknik göstergeler (SMA20, SMA50, RSI, trend)',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Hisse sembolü' },
-          period: { type: 'string', enum: ['1M', '3M', '6M', '1Y'], description: 'Zaman dilimi' }
-        },
-        required: ['symbol']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_watchlist',
-      description: 'Kullanıcının takip listesini göster',
-      parameters: { type: 'object', properties: {} }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'add_to_watchlist',
-      description: 'Hisse senedini takip listesine ekle',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Hisse sembolü' },
-          name: { type: 'string', description: 'Hisse adı' }
-        },
-        required: ['symbol', 'name']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'remove_from_watchlist',
-      description: 'Hisseyi takip listesinden çıkar',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Hisse sembolü' }
-        },
-        required: ['symbol']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'web_search',
-      description: 'Borsa ve finans haberleri için web araması yap',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Arama sorgusu' }
-        },
-        required: ['query']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_kap_data',
-      description: 'KAP (Kamuyu Aydınlatma Platformu) bildirimlerini al',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Hisse sembolü (opsiyonel)' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'scan_market',
-      description: 'Tüm BIST piyasasını tara: en çok yükselen ve düşen hisseleri bul',
-      parameters: { type: 'object', properties: {} }
-    }
-  }
-];
-
 // ============================================
 // CACHE
 // ============================================
@@ -530,115 +425,60 @@ async function executeTool(toolName: string, params: Record<string, unknown>, us
 }
 
 // ============================================
-// LLM SYSTEM PROMPT
+// QUERY ANALYZER (düzeltilmiş sembol regex)
 // ============================================
 
-const SYSTEM_PROMPT = `Sen profesyonel bir BIST (Borsa İstanbul) yatırım analiz asistanısın.
+function analyzeQuery(message: string): { type: string; symbols: string[]; tools: string[] } {
+  // Orijinal mesajdan BÜYÜK HARFLİ kelimeleri al (toUpperCase() KULLANMA)
+  // Bu sayede "THYAO" eşleşir ama "Bugün"den "BUG" çıkmaz
+  const rawSymbols = message.match(/\b([A-Z]{3,5})\b/g) || [];
+  const symbols = [...new Set(rawSymbols)];
 
-KURALLAR:
-1. Türkçe yanıt ver
-2. Markdown kullan (başlıklar ##, kalın **, listeler -)
-3. Emoji kullan (📊 📈 🔴 🟢 ⚠️)
-4. Asla "al/sat" tavsiyesi verme
-5. Sadece analitik yorum yap
-6. Tool'lardan gelen verileri detaylı analiz et ve yorumla
-7. Teknik göstergeleri açıkla (RSI, SMA, Trend)
-8. Risk faktörlerini belirt
-9. Sonuna uyarı ekle: "⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir."
+  let type = 'general';
+  let tools: string[] = [];
 
-YANIT FORMATI:
-- Kısa başlık
-- Önemli veriler (fiyat, değişim)
-- Teknik analiz yorumu (tool verilerini kullanarak)
-- Risk değerlendirmesi
-- Uyarı`;
-
-// ============================================
-// GROQ FUNCTION CALLING AGENT (PRIMARY)
-// ============================================
-
-async function generateWithGroq(
-  userMessage: string,
-  userId: string | null,
-  onToolCall: (toolName: string, params: Record<string, unknown>) => Promise<ToolResult>
-): Promise<{ response: string; toolsUsed: string[] }> {
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-  const messages: Groq.Chat.Completions.ChatCompletionMessageParam[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: userMessage }
-  ];
-
-  const toolsUsed: string[] = [];
-  let iterations = 0;
-  const MAX_ITERATIONS = 5;
-
-  while (iterations < MAX_ITERATIONS) {
-    iterations++;
-
-    const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages,
-      tools: GROQ_TOOL_DEFINITIONS,
-      tool_choice: 'auto',
-      max_tokens: 2000,
-      temperature: 0.7
-    });
-
-    const choice = completion.choices[0];
-
-    if (!choice) break;
-
-    // If no tool calls, return the final text response
-    if (choice.finish_reason === 'stop' || !choice.message.tool_calls?.length) {
-      const content = choice.message.content || '';
-      if (content) {
-        return { response: content, toolsUsed };
-      }
-      break;
-    }
-
-    // Process tool calls
-    messages.push(choice.message);
-
-    for (const toolCall of choice.message.tool_calls) {
-      const toolName = toolCall.function.name;
-      let params: Record<string, unknown> = {};
-
-      try {
-        params = JSON.parse(toolCall.function.arguments || '{}');
-      } catch {
-        params = {};
-      }
-
-      // Execute tool via callback (which also sends SSE events)
-      const result = await onToolCall(toolName, params);
-
-      if (!toolsUsed.includes(toolName)) {
-        toolsUsed.push(toolName);
-      }
-
-      // Add tool result to messages so Groq can interpret it
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: JSON.stringify(result.success ? result.data : { error: result.error })
-      });
-    }
+  if (/(tahmin|gelecek|ne olur|kaç olur|gün sonra)/i.test(message)) {
+    type = 'price_prediction';
+    tools = symbols.length > 0
+      ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search']
+      : ['scan_market'];
+  } else if (/satmalı|satsam|satayım/i.test(message)) {
+    type = 'sell_decision';
+    tools = symbols.length > 0
+      ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search']
+      : ['scan_market'];
+  } else if (/nereye|yatırım|öneri|hangi hisse/i.test(message)) {
+    type = 'market_overview';
+    tools = ['scan_market'];
+  } else if (/analiz|incele|detay/i.test(message)) {
+    type = 'analysis';
+    tools = symbols.length > 0
+      ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'web_search']
+      : ['scan_market'];
+  } else if (/yükselen|kazandıran/i.test(message)) {
+    type = 'gainers';
+    tools = ['scan_market'];
+  } else if (/düşen|kaybettiren/i.test(message)) {
+    type = 'losers';
+    tools = ['scan_market'];
+  } else if (/takip|listem|watchlist/i.test(message)) {
+    type = 'watchlist';
+    tools = ['get_watchlist'];
+  } else if (symbols.length > 0) {
+    type = 'stock_price';
+    tools = ['get_stock_price', 'get_stock_history'];
+  } else {
+    tools = ['scan_market'];
   }
 
-  throw new Error('Groq yanıt üretemedi');
+  return { type, symbols, tools };
 }
 
 // ============================================
-// Z.AI FALLBACK GENERATOR
+// CONTEXT BUILDER (araç sonuçlarından metin)
 // ============================================
 
-async function generateWithZAI(
-  userMessage: string,
-  toolResults: Map<string, ToolResult>
-): Promise<string> {
-  // Build context from tool results
+function buildContext(toolResults: Map<string, ToolResult>): string {
   const contextData: string[] = [];
 
   const priceResult = toolResults.get('get_stock_price');
@@ -648,22 +488,23 @@ async function generateWithZAI(
 Sembol: ${d.symbol}
 Ad: ${d.name}
 Güncel Fiyat: ${d.price} ₺
-Değişim: ${d.change} ₺ (${d.changePercent}%)
-Günlük Yüksek/Düşük: ${d.high}/${d.low} ₺
+Değişim: ${d.change} ₺ (%${d.changePercent})
+Günlük Yüksek/Düşük: ${d.high} / ${d.low} ₺
 Hacim: ${d.volume} lot
-Tavan/Taban: ${d.ceiling}/${d.floor} ₺`);
+Tavan/Taban: ${d.ceiling} / ${d.floor} ₺`);
   }
 
   const historyResult = toolResults.get('get_stock_history');
   if (historyResult?.success && historyResult.data) {
     const d = historyResult.data as Record<string, unknown>;
-    const indicators = d.indicators as Record<string, number | null>;
-    contextData.push(`📈 TEKNİK ANALİZ:
-SMA 20: ${indicators?.sma20 || 'N/A'} ₺
-SMA 50: ${indicators?.sma50 || 'N/A'} ₺
-RSI 14: ${indicators?.rsi || 'N/A'}
-Trend: ${d.trend === 'BULLISH' ? 'Yükseliş' : d.trend === 'BEARISH' ? 'Düşüş' : 'Yatay'}
-Dönem Değişimi: ${d.priceChange}%`);
+    const ind = d.indicators as Record<string, number | null>;
+    contextData.push(`📈 TEKNİK ANALİZ (${d.period}):
+SMA 20: ${ind?.sma20 ?? 'Hesaplanamadı'} ₺
+SMA 50: ${ind?.sma50 ?? 'Hesaplanamadı'} ₺
+RSI 14: ${ind?.rsi ?? 'Hesaplanamadı'}
+Trend: ${d.trend === 'BULLISH' ? 'YÜKSELİŞ' : d.trend === 'BEARISH' ? 'DÜŞÜŞ' : 'YATAY'}
+Dönem Değişimi: %${d.priceChange}
+İlk Fiyat: ${d.firstPrice} ₺ → Son Fiyat: ${d.lastPrice} ₺`);
   }
 
   const marketResult = toolResults.get('scan_market');
@@ -671,17 +512,19 @@ Dönem Değişimi: ${d.priceChange}%`);
     const d = marketResult.data as Record<string, unknown>;
     const gainers = d.gainers as Array<Record<string, unknown>>;
     const losers = d.losers as Array<Record<string, unknown>>;
-
-    contextData.push(`📊 PİYASA TARAMASI (${d.total} hisse):
-YÜKSELENLER: ${gainers?.slice(0, 5).map((g) => `${g.code}: ${g.price}₺ (+${g.changePercent}%)`).join(', ') || 'Yok'}
-DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.changePercent}%)`).join(', ') || 'Yok'}`);
+    contextData.push(`📊 PİYASA TARAMASI (${d.total} hisse tarandı):
+EN ÇOK YÜKSELENLER:
+${gainers?.slice(0, 8).map((g, i) => `${i + 1}. ${g.code} (${g.name}): ${g.price}₺ | %+${g.changePercent}`).join('\n') || 'Yok'}
+EN ÇOK DÜŞENLER:
+${losers?.slice(0, 8).map((l, i) => `${i + 1}. ${l.code} (${l.name}): ${l.price}₺ | %${l.changePercent}`).join('\n') || 'Yok'}`);
   }
 
   const webResult = toolResults.get('web_search');
   if (webResult?.success && webResult.data) {
     const results = webResult.data as Array<{ name?: string; snippet?: string; title?: string; description?: string }>;
     if (Array.isArray(results) && results.length > 0) {
-      contextData.push(`🔍 WEB ARAMA: ${results.slice(0, 3).map((r) => r.title || r.name || r.snippet || r.description || '').filter(Boolean).join(' | ')}`);
+      const items = results.slice(0, 5).map((r) => r.title || r.name || r.snippet || r.description || '').filter(Boolean);
+      if (items.length > 0) contextData.push(`🔍 WEB HABERLERI:\n${items.join('\n')}`);
     }
   }
 
@@ -689,7 +532,8 @@ DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.chan
   if (kapResult?.success && kapResult.data) {
     const results = kapResult.data as Array<{ name?: string; snippet?: string; title?: string; description?: string }>;
     if (Array.isArray(results) && results.length > 0) {
-      contextData.push(`📢 KAP BİLDİRİMLERİ: ${results.slice(0, 3).map((r) => r.title || r.name || r.snippet || r.description || '').filter(Boolean).join(' | ')}`);
+      const items = results.slice(0, 5).map((r) => r.title || r.name || r.snippet || r.description || '').filter(Boolean);
+      if (items.length > 0) contextData.push(`📢 KAP BİLDİRİMLERİ:\n${items.join('\n')}`);
     }
   }
 
@@ -697,18 +541,77 @@ DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.chan
   if (watchlistResult?.success && watchlistResult.data) {
     const items = watchlistResult.data as Array<{ symbol: string; name?: string }>;
     if (Array.isArray(items) && items.length > 0) {
-      contextData.push(`⭐ TAKİP LİSTESİ: ${items.map((item) => item.symbol).join(', ')}`);
+      contextData.push(`⭐ TAKİP LİSTESİ: ${items.map((item) => `${item.symbol}${item.name ? ` (${item.name})` : ''}`).join(', ')}`);
     }
   }
 
-  const userPrompt = `Kullanıcı Sorusu: ${userMessage}
+  return contextData.join('\n\n');
+}
 
-VERİLER:
-${contextData.join('\n\n')}
+// ============================================
+// LLM SYSTEM PROMPT
+// ============================================
 
-Lütfen bu verilere dayanarak profesyonel bir analiz yap.`;
+const SYSTEM_PROMPT = `Sen profesyonel bir BIST (Borsa İstanbul) yatırım analiz asistanısın.
 
+GÖREVIN: Sana verilen gerçek piyasa verilerini kullanarak detaylı analiz yap.
+
+KURALLAR:
+1. SADECE Türkçe yanıt ver
+2. Markdown kullan (## başlıklar, **kalın**, - listeler)
+3. Uygun emoji kullan (📊 📈 🔴 🟢 ⚠️ 💡)
+4. ASLA "al" veya "sat" tavsiyesi verme
+5. Verilen sayısal verileri kullan ve yorumla
+6. RSI değerini yorumla: <30 aşırı satım, >70 aşırı alım
+7. SMA kesişimlerini yorumla
+8. Risk faktörlerini belirt
+9. SONUNA MUTLAKA ekle: "⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir."
+
+ÖNEMLİ: Verilen verileri MUTLAKA yanıtına dahil et. Veri yoksa genel yorum yap.`;
+
+// ============================================
+// GROQ TEXT COMPLETION (BİRİNCİL LLM)
+// ============================================
+
+async function generateWithGroq(
+  userMessage: string,
+  context: string
+): Promise<string> {
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+  const userPrompt = context
+    ? `Kullanıcı sorusu: ${userMessage}\n\nGüncel piyasa verileri:\n${context}\n\nBu verileri kullanarak profesyonel analiz yap.`
+    : `Kullanıcı sorusu: ${userMessage}\n\nGenel BIST piyasası hakkında yorum yap.`;
+
+  const completion = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt }
+    ],
+    max_tokens: 2000,
+    temperature: 0.7
+  });
+
+  const content = completion.choices?.[0]?.message?.content;
+  if (!content) throw new Error('Groq boş yanıt döndü');
+  return content;
+}
+
+// ============================================
+// Z.AI TEXT COMPLETION (YEDEK LLM)
+// ============================================
+
+async function generateWithZAI(
+  userMessage: string,
+  context: string
+): Promise<string> {
   const zai = await createZaiClient();
+
+  const userPrompt = context
+    ? `Kullanıcı sorusu: ${userMessage}\n\nGüncel piyasa verileri:\n${context}\n\nBu verileri kullanarak profesyonel analiz yap.`
+    : `Kullanıcı sorusu: ${userMessage}\n\nGenel BIST piyasası hakkında yorum yap.`;
+
   const response = await zai.chat.completions.create({
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
@@ -718,11 +621,9 @@ Lütfen bu verilere dayanarak profesyonel bir analiz yap.`;
     temperature: 0.7
   });
 
-  if (response.choices?.[0]?.message?.content) {
-    return response.choices[0].message.content;
-  }
-
-  throw new Error('Z.AI yanıt üretemedi');
+  const content = response.choices?.[0]?.message?.content;
+  if (!content) throw new Error('Z.AI boş yanıt döndü');
+  return content;
 }
 
 // ============================================
@@ -833,7 +734,7 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        // Normal message - use Groq function calling agent
+        // Normal message
         const { message } = body;
         if (!message) {
           await writer.write(encoder.encode({ type: 'error', data: { error: 'Mesaj gerekli' } }));
@@ -841,88 +742,83 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        await writer.write(encoder.encode({
-          type: 'progress',
-          data: { message: '🤖 Groq AI analiz başlatıyor...' }
-        }));
-
-        // Collect tool results for Z.AI fallback
+        // 1) Sorguyu analiz et: hangi araçlar, hangi semboller
+        const { type, symbols, tools } = analyzeQuery(message);
         const toolResults = new Map<string, ToolResult>();
 
-        // Tool call callback - sends SSE events and executes tools
-        const onToolCall = async (toolName: string, params: Record<string, unknown>): Promise<ToolResult> => {
-          const toolInfo = TOOLS_INFO[toolName] || { name: toolName, description: `${toolName} çalışıyor...` };
+        await writer.write(encoder.encode({
+          type: 'progress',
+          data: { message: `🔍 Sorgu analiz edildi. ${tools.length} araç çalışacak...` }
+        }));
+
+        // 2) Araçları çalıştır
+        for (const tool of tools) {
+          const toolInfo = TOOLS_INFO[tool] || { name: tool, description: `${tool} çalışıyor...` };
 
           await writer.write(encoder.encode({
             type: 'tool_start',
-            data: { tool: toolName, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
+            data: { tool, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
           }));
 
-          const result = await executeTool(toolName, params, userId);
-          toolResults.set(toolName, result);
+          let params: Record<string, unknown> = {};
+          switch (tool) {
+            case 'get_stock_price':
+            case 'get_stock_history':
+            case 'get_kap_data':
+              params = { symbol: symbols[0], period: '1Y' };
+              break;
+            case 'web_search':
+              params = { query: symbols.length > 0 ? `${symbols[0]} hisse BIST analiz` : 'BIST piyasa analiz bugün' };
+              break;
+            default:
+              params = {};
+          }
+
+          const result = await executeTool(tool, params, userId);
+          toolResults.set(tool, result);
 
           await writer.write(encoder.encode({
             type: 'tool_result',
             data: {
-              tool: toolName,
+              tool,
               status: result.success ? 'completed' : 'error',
               result: result.data,
               message: result.success ? `${toolInfo.name} tamamlandı (${result._meta?.duration}ms)` : result.error
             }
           }));
+        }
 
-          return result;
-        };
+        // 3) Context oluştur
+        const context = buildContext(toolResults);
+        const toolsUsed = Array.from(toolResults.keys());
 
-        // Try Groq with function calling first (PRIMARY)
+        // 4) LLM ile analiz yap (Groq → Z.AI → static)
         await writer.write(encoder.encode({
           type: 'llm_start',
-          data: { message: '🤖 Groq AI düşünüyor ve araçları çağırıyor...' }
+          data: { message: '🤖 Groq AI analiz yapıyor...' }
         }));
 
         let finalResponse = '';
-        let toolsUsed: string[] = [];
 
         try {
-          const groqResult = await generateWithGroq(message, userId, onToolCall);
-          finalResponse = groqResult.response;
-          toolsUsed = groqResult.toolsUsed;
+          finalResponse = await generateWithGroq(message, context);
         } catch (groqError) {
           console.error('Groq failed, falling back to Z.AI:', groqError);
-
-          // If Groq failed but we have no tool results yet, run basic tools
-          if (toolResults.size === 0) {
-            const upperMessage = message.toUpperCase();
-            const symbolMatches: string[] = upperMessage.match(/\b([A-Z]{3,5})\b/g) || [];
-            const symbols = [...new Set(symbolMatches)].filter((s) => s.length >= 3 && s.length <= 5);
-
-            if (symbols.length > 0) {
-              await onToolCall('get_stock_price', { symbol: symbols[0] });
-              await onToolCall('get_stock_history', { symbol: symbols[0], period: '1M' });
-            } else {
-              await onToolCall('scan_market', {});
-            }
-          }
-
-          // Z.AI fallback
           await writer.write(encoder.encode({
             type: 'llm_start',
-            data: { message: '🔄 Z.AI ile yedek analiz yapılıyor...' }
+            data: { message: '🔄 Z.AI yedek analiz yapıyor...' }
           }));
-
           try {
-            finalResponse = await generateWithZAI(message, toolResults);
-            toolsUsed = Array.from(toolResults.keys());
+            finalResponse = await generateWithZAI(message, context);
           } catch (zaiError) {
-            console.error('Z.AI also failed, using static fallback:', zaiError);
+            console.error('Z.AI also failed, static fallback:', zaiError);
             finalResponse = generateFallbackResponse(toolResults);
-            toolsUsed = Array.from(toolResults.keys());
           }
         }
 
         await writer.write(encoder.encode({
           type: 'complete',
-          data: { response: finalResponse, toolsUsed, symbols: [] }
+          data: { response: finalResponse, toolsUsed, queryType: type, symbols }
         }));
 
         await writer.close();
