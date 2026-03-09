@@ -20,38 +20,47 @@ async function fetchMarketData() {
   }
 
   try {
-    const allStocks: { code: string; name: string }[] = [];
     const seenCodes = new Set<string>();
+    const allStocks: { code: string; name: string }[] = [];
 
-    for (let page = 1; page <= 7; page++) {
-      const listResponse = await fetch(`https://api.asenax.com/bist/list?sayfa=${page}`);
-      const listData = await listResponse.json();
+    const asenaxRes = await fetch('https://api.asenax.com/bist/list');
+    const asenaxData = await asenaxRes.json();
 
-      if (listData.code !== "0" || !Array.isArray(listData.data) || listData.data.length === 0) {
-        break;
-      }
-
-      const pageStocks = listData.data
+    if (asenaxData.code === "0" && Array.isArray(asenaxData.data)) {
+      asenaxData.data
         .filter((item: { tip?: string }) => item.tip === "Hisse")
-        .map((item: { kod?: string; ad?: string }) => ({
-          code: item.kod || '',
-          name: item.ad || ''
-        }))
-        .filter((s: { code: string }) => s.code.length > 0 && !seenCodes.has(s.code));
+        .forEach((item: { kod?: string; ad?: string }) => {
+          const code = item.kod || '';
+          if (code.length > 0 && !seenCodes.has(code)) {
+            seenCodes.add(code);
+            allStocks.push({ code, name: item.ad || '' });
+          }
+        });
+    }
 
-      if (pageStocks.length === 0) break;
-
-      pageStocks.forEach((s: { code: string; name: string }) => {
-        seenCodes.add(s.code);
-        allStocks.push(s);
-      });
+    try {
+      const bigparaRes = await fetch('https://bigpara.hurriyet.com.tr/api/HisseSenedi/HisseSenediList');
+      const bigparaData = await bigparaRes.json();
+      const list = bigparaData?.data?.hisseler ?? bigparaData?.data ?? bigparaData;
+      if (Array.isArray(list)) {
+        list.forEach((item: Record<string, string>) => {
+          const code = (item.KOD || item.kod || item.symbol || item.Symbol || '').trim();
+          const name = item.AD || item.ad || item.name || item.Name || '';
+          if (code.length > 0 && !seenCodes.has(code)) {
+            seenCodes.add(code);
+            allStocks.push({ code, name });
+          }
+        });
+      }
+    } catch {
+      // BigPara çalışmıyorsa sadece Asenax ile devam
     }
 
     if (allStocks.length === 0) {
       return null;
     }
 
-    const stocks = allStocks;
+    const stocks = allStocks.slice(0, 1000);
 
     const results: StockData[] = [];
 
