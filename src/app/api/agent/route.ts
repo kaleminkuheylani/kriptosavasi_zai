@@ -139,85 +139,103 @@ async function getStockPrice(symbol: string): Promise<ToolResult> {
   }
 }
 
+function calcIndicators(closes: number[], period: string) {
+  const sma20 = closes.length >= 20 ? closes.slice(-20).reduce((a, b) => a + b, 0) / 20 : null;
+  const sma50 = closes.length >= 50 ? closes.slice(-50).reduce((a, b) => a + b, 0) / 50 : null;
+
+  let rsi: number | null = null;
+  if (closes.length >= 15) {
+    const changes = closes.slice(-15).slice(1).map((c, i) => c - closes.slice(-15)[i]);
+    const gains = changes.filter(c => c > 0);
+    const losses = changes.filter(c => c < 0).map(c => Math.abs(c));
+    const avgGain = gains.reduce((a, b) => a + b, 0) / 14;
+    const avgLoss = losses.reduce((a, b) => a + b, 0) / 14;
+    const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    rsi = Math.round((100 - (100 / (1 + rs))) * 100) / 100;
+  }
+
+  const firstPrice = closes[0] || 0;
+  const lastPrice = closes[closes.length - 1] || 0;
+  const priceChange = firstPrice > 0 ? Math.round(((lastPrice - firstPrice) / firstPrice * 100) * 100) / 100 : 0;
+  const trend = sma20 && sma50 ? (sma20 > sma50 ? 'BULLISH' : 'BEARISH') : (closes[closes.length - 1] > closes[0] ? 'BULLISH' : 'BEARISH');
+
+  return {
+    sma20: sma20 ? Math.round(sma20 * 100) / 100 : null,
+    sma50: sma50 ? Math.round(sma50 * 100) / 100 : null,
+    rsi,
+    trend,
+    priceChange,
+    firstPrice,
+    lastPrice,
+    period
+  };
+}
+
 async function getStockHistory(symbol: string, period: string = '1M'): Promise<ToolResult> {
   const startTime = Date.now();
 
-  try {
-    const rangeMap: Record<string, number> = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365 };
-    const days = rangeMap[period] || 30;
+  const rangeMap: Record<string, string> = { '1M': '1mo', '3M': '3mo', '6M': '6mo', '1Y': '1y' };
+  const yahooRange = rangeMap[period] || '1mo';
+  const yahooSymbol = `${symbol.toUpperCase()}.IS`;
 
-    const response = await fetch(
+  // 1) Yahoo Finance (birincil kaynak)
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=1d&range=${yahooRange}`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+
+    if (result?.timestamp && result?.indicators?.quote?.[0]) {
+      const timestamps: number[] = result.timestamp;
+      const q = result.indicators.quote[0];
+      const closes: number[] = q.close.map((c: number | null) => c ?? 0).filter((c: number) => c > 0);
+
+      if (closes.length > 0) {
+        const indicators = calcIndicators(closes, period);
+        return {
+          success: true,
+          data: { count: closes.length, ...indicators },
+          _meta: { tool: 'get_stock_history', duration: Date.now() - startTime }
+        };
+      }
+    }
+  } catch {
+    // Yahoo Finance başarısız, Z.AI'ye dön
+  }
+
+  // 2) Z.AI Finance API (yedek)
+  try {
+    const rangeMapDays: Record<string, number> = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365 };
+    const days = rangeMapDays[period] || 30;
+    const res = await fetch(
       `https://internal-api.z.ai/external/finance/v1/markets/stock/history?symbol=${symbol.toUpperCase()}.IS&interval=1d`,
       { headers: { 'X-Z-AI-From': 'Z' } }
     );
-
-    const data = await response.json();
-    const now = Date.now() / 1000;
-    const cutoff = now - (days * 24 * 60 * 60);
+    const data = await res.json();
+    const cutoff = Date.now() / 1000 - (days * 86400);
 
     if (data.body) {
-      const historical = Object.values(data.body as Record<string, {
-        date: string;
-        date_utc: number;
-        open: number;
-        high: number;
-        low: number;
-        close: number;
-        volume: number;
-      }>)
-        .filter((e) => e.date_utc >= cutoff)
-        .map((e) => ({
-          date: e.date,
-          open: e.open,
-          high: e.high,
-          low: e.low,
-          close: e.close,
-          volume: e.volume
-        }))
-        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      const historical = (Object.values(data.body) as Array<{ date: string; date_utc: number; close: number }>)
+        .filter(e => e.date_utc >= cutoff)
+        .sort((a, b) => a.date_utc - b.date_utc);
 
       const closes = historical.map(h => h.close);
-      const sma20 = closes.length >= 20 ? closes.slice(-20).reduce((a, b) => a + b, 0) / 20 : null;
-      const sma50 = closes.length >= 50 ? closes.slice(-50).reduce((a, b) => a + b, 0) / 50 : null;
-
-      let rsi: number | null = null;
-      if (closes.length >= 14) {
-        const changes = closes.slice(1).map((c, i) => c - closes[i]);
-        const gains = changes.filter(c => c > 0);
-        const losses = changes.filter(c => c < 0).map(c => Math.abs(c));
-        const avgGain = gains.length > 0 ? gains.reduce((a, b) => a + b, 0) / 14 : 0;
-        const avgLoss = losses.length > 0 ? losses.reduce((a, b) => a + b, 0) / 14 : 0;
-        const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-        rsi = 100 - (100 / (1 + rs));
+      if (closes.length > 0) {
+        const indicators = calcIndicators(closes, period);
+        return {
+          success: true,
+          data: { count: closes.length, ...indicators },
+          _meta: { tool: 'get_stock_history', duration: Date.now() - startTime }
+        };
       }
-
-      const firstPrice = historical[0]?.close || 0;
-      const lastPrice = historical[historical.length - 1]?.close || 0;
-      const priceChange = firstPrice > 0 ? ((lastPrice - firstPrice) / firstPrice * 100) : 0;
-
-      return {
-        success: true,
-        data: {
-          historical: historical.slice(-30),
-          count: historical.length,
-          period,
-          indicators: {
-            sma20: sma20 ? Math.round(sma20 * 100) / 100 : null,
-            sma50: sma50 ? Math.round(sma50 * 100) / 100 : null,
-            rsi: rsi ? Math.round(rsi * 100) / 100 : null
-          },
-          trend: sma20 && sma50 ? (sma20 > sma50 ? 'BULLISH' : 'BEARISH') : 'NEUTRAL',
-          priceChange: Math.round(priceChange * 100) / 100,
-          lastPrice,
-          firstPrice
-        },
-        _meta: { tool: 'get_stock_history', duration: Date.now() - startTime }
-      };
     }
-    return { success: false, error: 'Veri bulunamadı', _meta: { tool: 'get_stock_history', duration: Date.now() - startTime } };
-  } catch (error) {
-    return { success: false, error: String(error), _meta: { tool: 'get_stock_history', duration: Date.now() - startTime } };
+  } catch {
+    // Z.AI de başarısız
   }
+
+  return { success: false, error: 'Tarihsel veri alınamadı', _meta: { tool: 'get_stock_history', duration: Date.now() - startTime } };
 }
 
 async function getWatchlist(userId: string | null): Promise<ToolResult> {
@@ -631,45 +649,124 @@ async function generateWithZAI(
 // ============================================
 
 function generateFallbackResponse(toolResults: Map<string, ToolResult>): string {
-  const formatNumber = (n: number) => n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmt = (n: number) => n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   let response = '';
 
+  // Hisse fiyat analizi
   const priceResult = toolResults.get('get_stock_price');
-  if (priceResult?.success && priceResult.data) {
-    const d = priceResult.data as { symbol: string; name: string; price: number; changePercent: number; change: number; volume: number; high: number; low: number };
-    response += `## 📊 ${d.symbol} - ${d.name}\n\n`;
-    response += `**Fiyat:** ${formatNumber(d.price)} ₺\n`;
-    response += `**Değişim:** ${d.changePercent >= 0 ? '+' : ''}${formatNumber(d.changePercent)}%\n`;
-    response += `**Hacim:** ${d.volume?.toLocaleString('tr-TR') || 0} lot\n\n`;
-  }
-
   const historyResult = toolResults.get('get_stock_history');
-  if (historyResult?.success && historyResult.data) {
-    const d = historyResult.data as { indicators: { sma20: number | null; sma50: number | null; rsi: number | null }; trend: string; priceChange: number };
-    response += `## 📈 Teknik Analiz\n\n`;
-    if (d.indicators?.sma20) response += `**SMA 20:** ${formatNumber(d.indicators.sma20)} ₺\n`;
-    if (d.indicators?.sma50) response += `**SMA 50:** ${formatNumber(d.indicators.sma50)} ₺\n`;
-    if (d.indicators?.rsi) response += `**RSI 14:** ${formatNumber(d.indicators.rsi)}\n`;
-    response += `**Trend:** ${d.trend === 'BULLISH' ? '🟢 Yükseliş' : d.trend === 'BEARISH' ? '🔴 Düşüş' : '🟡 Yatay'}\n\n`;
+
+  if (priceResult?.success && priceResult.data) {
+    const d = priceResult.data as { symbol: string; name: string; price: number; changePercent: number; change: number; volume: number; high: number; low: number; ceiling: number; floor: number; open: number; previousClose: number };
+
+    const changeIcon = d.changePercent > 0 ? '🟢' : d.changePercent < 0 ? '🔴' : '🟡';
+    response += `## 📊 ${d.symbol} - ${d.name}\n\n`;
+    response += `| Gösterge | Değer |\n|---|---|\n`;
+    response += `| 💰 Güncel Fiyat | **${fmt(d.price)} ₺** |\n`;
+    response += `| ${changeIcon} Değişim | **${d.changePercent >= 0 ? '+' : ''}${fmt(d.changePercent)}%** (${d.change >= 0 ? '+' : ''}${fmt(d.change)} ₺) |\n`;
+    response += `| 📈 Gün Yüksek | ${fmt(d.high)} ₺ |\n`;
+    response += `| 📉 Gün Düşük | ${fmt(d.low)} ₺ |\n`;
+    response += `| 🔓 Açılış | ${fmt(d.open)} ₺ |\n`;
+    response += `| 📦 Hacim | ${d.volume?.toLocaleString('tr-TR') || 0} lot |\n`;
+    response += `| 🔼 Tavan | ${fmt(d.ceiling)} ₺ |\n`;
+    response += `| 🔽 Taban | ${fmt(d.floor)} ₺ |\n\n`;
+
+    // Günlük yorum
+    const dayRange = d.high - d.low;
+    const position = dayRange > 0 ? ((d.price - d.low) / dayRange) * 100 : 50;
+    response += `### 💡 Günlük Değerlendirme\n\n`;
+    if (d.changePercent > 3) response += `- Güçlü yükseliş günü (%${fmt(d.changePercent)}). Hacim takibi önemli.\n`;
+    else if (d.changePercent > 0) response += `- Pozitif seyir. Alıcılar kontrolde.\n`;
+    else if (d.changePercent < -3) response += `- Sert satış baskısı (%${fmt(d.changePercent)}). Destek seviyeleri kritik.\n`;
+    else if (d.changePercent < 0) response += `- Hafif negatif. Satıcılar baskısı var.\n`;
+    else response += `- Yatay seyir. Yön belirsizliği devam ediyor.\n`;
+
+    if (position > 70) response += `- Fiyat günlük aralığın üst bölgesinde (**%${fmt(position)}** konumda). Alıcılar güçlü.\n`;
+    else if (position < 30) response += `- Fiyat günlük aralığın alt bölgesinde (**%${fmt(position)}** konumda). Satıcılar baskılı.\n`;
+    response += '\n';
   }
 
+  // Teknik analiz
+  if (historyResult?.success && historyResult.data) {
+    const d = historyResult.data as { sma20: number | null; sma50: number | null; rsi: number | null; trend: string; priceChange: number; firstPrice: number; lastPrice: number; period: string };
+
+    response += `## 📈 Teknik Analiz (${d.period || '1Y'})\n\n`;
+    response += `| Gösterge | Değer | Yorum |\n|---|---|---|\n`;
+
+    if (d.sma20) {
+      const vs20 = d.lastPrice && d.sma20 ? ((d.lastPrice - d.sma20) / d.sma20 * 100) : 0;
+      response += `| SMA 20 | ${fmt(d.sma20)} ₺ | Fiyat SMA20'nin **${vs20 >= 0 ? `%${fmt(vs20)} üstünde` : `%${fmt(Math.abs(vs20))} altında`}** |\n`;
+    }
+    if (d.sma50) {
+      const vs50 = d.lastPrice && d.sma50 ? ((d.lastPrice - d.sma50) / d.sma50 * 100) : 0;
+      response += `| SMA 50 | ${fmt(d.sma50)} ₺ | Fiyat SMA50'nin **${vs50 >= 0 ? `%${fmt(vs50)} üstünde` : `%${fmt(Math.abs(vs50))} altında`}** |\n`;
+    }
+    if (d.rsi) {
+      const rsiYorum = d.rsi > 70 ? '⚠️ Aşırı alım' : d.rsi < 30 ? '⚠️ Aşırı satım' : d.rsi > 55 ? '🟢 Güçlü bölge' : d.rsi < 45 ? '🔴 Zayıf bölge' : '🟡 Nötr';
+      response += `| RSI 14 | **${fmt(d.rsi)}** | ${rsiYorum} |\n`;
+    }
+    response += `| Dönem Getirisi | **%${d.priceChange >= 0 ? '+' : ''}${fmt(d.priceChange)}** | ${d.priceChange >= 0 ? '🟢' : '🔴'} |\n\n`;
+
+    // Trend analizi
+    response += `### 🎯 Trend Değerlendirmesi\n\n`;
+    const trendIcon = d.trend === 'BULLISH' ? '🟢' : d.trend === 'BEARISH' ? '🔴' : '🟡';
+    response += `**${trendIcon} ${d.trend === 'BULLISH' ? 'YÜKSELİŞ TRENDI' : d.trend === 'BEARISH' ? 'DÜŞÜŞ TRENDI' : 'YATAY TREND'}**\n\n`;
+
+    if (d.sma20 && d.sma50) {
+      if (d.sma20 > d.sma50) response += `- 20 günlük SMA, 50 günlük SMA'nın **üzerinde** → Kısa vadeli momentum pozitif\n`;
+      else response += `- 20 günlük SMA, 50 günlük SMA'nın **altında** → Kısa vadeli momentum negatif\n`;
+    }
+    if (d.rsi) {
+      if (d.rsi > 70) response += `- RSI aşırı alım bölgesinde (**${fmt(d.rsi)}**) → Kısa vadede düzeltme gelebilir\n`;
+      else if (d.rsi < 30) response += `- RSI aşırı satım bölgesinde (**${fmt(d.rsi)}**) → Teknik toparlanma potansiyeli var\n`;
+      else response += `- RSI nötr bölgede (**${fmt(d.rsi)}**) → Belirgin bir sinyal yok\n`;
+    }
+    response += '\n';
+  }
+
+  // Piyasa tarama
   const marketResult = toolResults.get('scan_market');
   if (marketResult?.success && marketResult.data) {
-    const d = marketResult.data as { gainers: Array<{ code: string; price: number; changePercent: number }>; losers: Array<{ code: string; price: number; changePercent: number }>; total: number };
-    response += `## 📊 Piyasa Özeti (${d.total} hisse)\n\n`;
-    response += `### 🟢 Yükselenler\n`;
-    d.gainers.slice(0, 5).forEach((g, i) => {
-      response += `${i + 1}. **${g.code}** - ${formatNumber(g.price)} ₺ (+${formatNumber(g.changePercent)}%)\n`;
-    });
-    response += `\n### 🔴 Düşenler\n`;
-    d.losers.slice(0, 5).forEach((l, i) => {
-      response += `${i + 1}. **${l.code}** - ${formatNumber(l.price)} ₺ (${formatNumber(l.changePercent)}%)\n`;
-    });
-    response += `\n`;
+    const d = marketResult.data as { gainers: Array<{ code: string; name?: string; price: number; changePercent: number }>; losers: Array<{ code: string; name?: string; price: number; changePercent: number }>; total: number };
+    response += `## 📊 BIST Piyasa Özeti (${d.total} hisse tarandı)\n\n`;
+    response += `### 🟢 En Çok Yükselen ${d.gainers.length > 0 ? `(Top ${Math.min(d.gainers.length, 8)})` : ''}\n\n`;
+    if (d.gainers.length > 0) {
+      d.gainers.slice(0, 8).forEach((g, i) => {
+        response += `${i + 1}. **${g.code}**${g.name ? ` - ${g.name}` : ''} → ${fmt(g.price)} ₺ | 🟢 **+${fmt(g.changePercent)}%**\n`;
+      });
+    } else {
+      response += `*Yükselen hisse bulunamadı*\n`;
+    }
+    response += `\n### 🔴 En Çok Düşen ${d.losers.length > 0 ? `(Top ${Math.min(d.losers.length, 8)})` : ''}\n\n`;
+    if (d.losers.length > 0) {
+      d.losers.slice(0, 8).forEach((l, i) => {
+        response += `${i + 1}. **${l.code}**${l.name ? ` - ${l.name}` : ''} → ${fmt(l.price)} ₺ | 🔴 **${fmt(l.changePercent)}%**\n`;
+      });
+    } else {
+      response += `*Düşen hisse bulunamadı*\n`;
+    }
+    response += '\n';
   }
 
-  response += `\n---\n⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.`;
-  return response || 'Veri alındı ancak analiz yapılamadı.';
+  // Takip listesi
+  const watchlistResult = toolResults.get('get_watchlist');
+  if (watchlistResult?.success && watchlistResult.data) {
+    const items = watchlistResult.data as Array<{ symbol: string; name?: string; target_price?: number }>;
+    if (Array.isArray(items) && items.length > 0) {
+      response += `## ⭐ Takip Listesi (${items.length} hisse)\n\n`;
+      items.forEach((item) => {
+        response += `- **${item.symbol}**${item.name ? ` - ${item.name}` : ''}${item.target_price ? ` | Hedef: ${fmt(item.target_price)} ₺` : ''}\n`;
+      });
+      response += '\n';
+    } else {
+      response += `## ⭐ Takip Listesi\n\n*Takip listesi boş.*\n\n`;
+    }
+  }
+
+  if (!response) response = '## ℹ️ Bilgi\n\nVeri alınamadı. Lütfen hisse sembolünü kontrol edip tekrar deneyin.\n\n';
+
+  response += `\n---\n⚠️ **Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.** Yatırım kararı vermeden önce uzman görüşü alınız.`;
+  return response;
 }
 
 // ============================================
