@@ -1610,7 +1610,7 @@ export default function Home() {
           )}
 
           {/* Chat Messages */}
-          <ScrollArea className="flex-1 pr-4">
+          <div className="flex-1 pr-4 overflow-y-auto min-h-0">
             {chatMessages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center p-8">
                 <Bot className="h-16 w-16 text-slate-700 mb-4" />
@@ -1716,7 +1716,7 @@ export default function Home() {
                 <div ref={chatEndRef} />
               </div>
             )}
-          </ScrollArea>
+          </div>
 
           {/* Input Area */}
           <div className="flex gap-2 mt-4 pt-4 border-t border-slate-800">
