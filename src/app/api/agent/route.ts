@@ -1,7 +1,14 @@
 import { NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
 import { getSupabase } from '@/lib/supabase';
-import ZAI from 'z-ai-web-dev-sdk';
+import OpenAI from 'openai';
+
+// OpenAI client (singleton)
+function getOpenAI(): OpenAI {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY is not set');
+  return new OpenAI({ apiKey });
+}
 
 // ============================================
 // TYPES & INTERFACES
@@ -511,12 +518,18 @@ async function removeFromWatchlist(symbol: string, userId: string | null): Promi
 // WEB SEARCH & NEWS TOOLS
 // ============================================
 
+// Web search via OpenAI (responses API with web_search_preview tool)
 async function webSearch(query: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
-    const results = await zai.functions.invoke('web_search', { query, num: 5 });
-    return { success: true, data: results, _meta: { tool: 'web_search', duration: Date.now() - startTime } };
+    const openai = getOpenAI();
+    const response = await openai.responses.create({
+      model: 'gpt-4o-mini',
+      tools: [{ type: 'web_search_preview' }],
+      input: query,
+    });
+    const text = response.output_text || '';
+    return { success: true, data: [{ title: query, snippet: text }], _meta: { tool: 'web_search', duration: Date.now() - startTime } };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'web_search', duration: Date.now() - startTime } };
   }
@@ -525,10 +538,15 @@ async function webSearch(query: string): Promise<ToolResult> {
 async function getKapData(symbol?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
-    const query = symbol ? `${symbol} hisse KAP bildirim` : 'BIST KAP bildirim bugün';
-    const results = await zai.functions.invoke('web_search', { query, num: 10 });
-    return { success: true, data: results, _meta: { tool: 'get_kap_data', duration: Date.now() - startTime } };
+    const openai = getOpenAI();
+    const query = symbol ? `${symbol} hisse KAP bildirim son açıklamalar` : 'BIST KAP bildirim bugün önemli açıklamalar';
+    const response = await openai.responses.create({
+      model: 'gpt-4o-mini',
+      tools: [{ type: 'web_search_preview' }],
+      input: query,
+    });
+    const text = response.output_text || '';
+    return { success: true, data: [{ title: query, snippet: text }], _meta: { tool: 'get_kap_data', duration: Date.now() - startTime } };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'get_kap_data', duration: Date.now() - startTime } };
   }
@@ -537,31 +555,23 @@ async function getKapData(symbol?: string): Promise<ToolResult> {
 async function getNews(symbol?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
-    const queries = symbol
-      ? [`${symbol} hisse haberi son dakika`, `${symbol} borsa analizi yorum`, `KAP ${symbol} bildirim`]
-      : ['BIST 100 borsa haberi bugün', 'Türkiye borsa son dakika', 'BIST piyasa analizi'];
+    const openai = getOpenAI();
+    const query = symbol
+      ? `${symbol} hisse son haberler borsa analizi KAP bildirimleri`
+      : 'BIST 100 borsa haberleri bugün Türkiye piyasa analizi';
 
-    const results = await Promise.all(queries.map(q => zai.functions.invoke('web_search', { query: q, num: 5 })));
+    const response = await openai.responses.create({
+      model: 'gpt-4o-mini',
+      tools: [{ type: 'web_search_preview' }],
+      input: query,
+    });
 
-    const allNews: Array<{ title: string; summary: string; source: string; url: string; date?: string }> = [];
-    const seen = new Set<string>();
-
-    for (const result of results) {
-      if (Array.isArray(result)) {
-        for (const item of result) {
-          const title = item.name || item.title || '';
-          if (title && !seen.has(title)) {
-            seen.add(title);
-            allNews.push({ title, summary: item.snippet || item.description || '', source: item.host_name || 'BIST', url: item.url || '', date: item.date });
-          }
-        }
-      }
-    }
+    const text = response.output_text || '';
+    const news = [{ title: query, summary: text, source: 'Web', url: '', date: new Date().toISOString() }];
 
     return {
       success: true,
-      data: { symbol: symbol || 'BIST 100', news: allNews.slice(0, 10), total: allNews.length, timestamp: new Date().toISOString() },
+      data: { symbol: symbol || 'BIST 100', news, total: news.length, timestamp: new Date().toISOString() },
       _meta: { tool: 'get_news', duration: Date.now() - startTime }
     };
   } catch (error) {
@@ -572,16 +582,22 @@ async function getNews(symbol?: string): Promise<ToolResult> {
 async function analyzeChartImage(imageBase64: string, symbol?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
-    const response = await zai.chat.completions.createVision({
+    const openai = getOpenAI();
+    const imageUrl = imageBase64.startsWith('data:') ? imageBase64 : `data:image/png;base64,${imageBase64}`;
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: `Bu finansal grafiği detaylıca analiz et. ${symbol ? `Hisse: ${symbol}` : ''}\n\nAnaliz şunları içermeli:\n- Trend yönü ve gücü\n- Destek/direnç seviyeleri\n- Teknik formasyonlar (varsa)\n- Hacim analizi\n- Genel yorum` },
-          { type: 'image_url', image_url: { url: imageBase64.startsWith('data:') ? imageBase64 : `data:image/png;base64,${imageBase64}` } }
+          {
+            type: 'text',
+            text: `Bu finansal grafiği detaylıca analiz et.${symbol ? ` Hisse: ${symbol}` : ''}\n\nAnaliz şunları içermeli:\n- Trend yönü ve gücü\n- Destek/direnç seviyeleri\n- Teknik formasyonlar (varsa)\n- Hacim analizi\n- Genel yorum`
+          },
+          { type: 'image_url', image_url: { url: imageUrl } }
         ]
       }],
-      thinking: { type: 'disabled' }
+      max_tokens: 1500,
     });
 
     return {
@@ -597,13 +613,14 @@ async function analyzeChartImage(imageBase64: string, symbol?: string): Promise<
 async function readTxtFile(content: string, filename?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
-    const zai = await ZAI.create();
-    const response = await zai.chat.completions.create({
+    const openai = getOpenAI();
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: 'Sen finansal analiz asistanısın. TXT dosyasını analiz et ve önemli bilgileri çıkar.' },
         { role: 'user', content: `Dosya: ${filename || 'bilinmiyor'}\n\n${content.slice(0, 8000)}` }
       ],
-      max_tokens: 1500
+      max_tokens: 1500,
     });
 
     return {
@@ -678,7 +695,7 @@ async function runOpenAgentLoop(
   writer: WritableStreamDefaultWriter<Uint8Array>,
   encoder: { encode: (msg: SSEMessage) => Uint8Array }
 ): Promise<{ response: string; toolsUsed: string[] }> {
-  const zai = await ZAI.create();
+  const openai = getOpenAI();
   const toolsUsed: string[] = [];
   const toolResultsMap = new Map<string, ToolResult>();
 
@@ -706,7 +723,7 @@ KURALLAR:
 8. Global semboller: AAPL, TSLA, MSFT, GOOG, AMZN, BTC-USD, ETH-USD, SPY, QQQ vs.
 9. BIST semboller: THYAO, GARAN, ASELS, SISE, EREGL vs.`;
 
-  const messages: AgentMessage[] = [
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage }
   ];
@@ -714,28 +731,27 @@ KURALLAR:
   const MAX_ITERATIONS = 6;
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    // Call LLM with tool schemas
-    let llmResponse: { choices?: Array<{ message?: { content?: string; tool_calls?: ToolCall[] }; finish_reason?: string }> };
+    let llmResponse: OpenAI.Chat.ChatCompletion;
 
     try {
-      llmResponse = await (zai.chat.completions as unknown as {
-        create: (opts: unknown) => Promise<typeof llmResponse>
-      }).create({
+      llmResponse = await openai.chat.completions.create({
+        model: 'gpt-4o',
         messages,
-        tools: TOOL_SCHEMAS,
-        tool_choice: iteration === 0 ? 'auto' : 'auto',
+        tools: TOOL_SCHEMAS as OpenAI.Chat.ChatCompletionTool[],
+        tool_choice: 'auto',
         max_tokens: 2500,
         temperature: 0.3,
       });
-    } catch {
-      // Fallback: LLM without tool calling
-      const fallbackResp = await zai.chat.completions.create({
-        messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+    } catch (err) {
+      // Fallback without tool calling
+      const fallback = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: messages.filter(m => m.role !== 'tool') as OpenAI.Chat.ChatCompletionMessageParam[],
         max_tokens: 2000,
         temperature: 0.5,
       });
       return {
-        response: fallbackResp.choices?.[0]?.message?.content || 'Analiz tamamlandı.',
+        response: fallback.choices?.[0]?.message?.content || generateContextualResponse(toolResultsMap),
         toolsUsed
       };
     }
@@ -754,41 +770,34 @@ KURALLAR:
       };
     }
 
-    // Process tool calls
     const toolCalls = assistantMessage.tool_calls || [];
 
-    // Add assistant message with tool calls to history
-    messages.push({
-      role: 'assistant',
-      content: assistantMessage.content || '',
-      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } as unknown as object : {})
-    } as AgentMessage);
+    // Add assistant message to history
+    messages.push(assistantMessage);
 
     // Execute each tool call
     for (const toolCall of toolCalls) {
-      const toolName = toolCall.function.name;
+      const tc = toolCall as unknown as { id: string; function: { name: string; arguments: string } };
+      const toolName = tc.function.name;
       let params: Record<string, unknown> = {};
 
       try {
-        params = JSON.parse(toolCall.function.arguments);
+        params = JSON.parse(tc.function.arguments);
       } catch {
         params = {};
       }
 
       const toolInfo = TOOLS_INFO[toolName] || { name: toolName, description: `${toolName} çalışıyor...` };
 
-      // Emit tool_start
       await writer.write(encoder.encode({
         type: 'tool_start',
         data: { tool: toolName, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
       }));
 
-      // Execute tool
       const result = await executeTool(toolName, params, userId);
       toolsUsed.push(toolName);
       toolResultsMap.set(toolName, result);
 
-      // Emit tool_result
       await writer.write(encoder.encode({
         type: 'tool_result',
         data: {
@@ -804,8 +813,7 @@ KURALLAR:
       // Add tool result to message history
       messages.push({
         role: 'tool',
-        tool_call_id: toolCall.id,
-        name: toolName,
+        tool_call_id: tc.id,
         content: result.success
           ? JSON.stringify(result.data).slice(0, 3000)
           : `Error: ${result.error}`
@@ -813,10 +821,11 @@ KURALLAR:
     }
   }
 
-  // Max iterations reached - generate final response from collected data
-  const finalResp = await zai.chat.completions.create({
+  // Max iterations reached — summarize
+  const finalResp = await openai.chat.completions.create({
+    model: 'gpt-4o',
     messages: [
-      ...messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+      ...messages,
       { role: 'user', content: 'Tüm verileri analiz ederek kapsamlı bir sonuç yaz.' }
     ],
     max_tokens: 2000,
