@@ -29,6 +29,8 @@ interface SSEMessage {
     queryType?: string;
     symbols?: string[];
     error?: string;
+    requiresAuth?: boolean;
+    [key: string]: unknown;
   };
 }
 
@@ -37,17 +39,220 @@ interface SSEMessage {
 // ============================================
 
 const TOOLS_INFO: Record<string, { name: string; description: string }> = {
-  get_stock_price: { name: 'Hisse Fiyatı', description: 'Güncel fiyat verisi alınıyor...' },
-  get_stock_history: { name: 'Geçmiş Veri', description: 'Tarihsel veriler analiz ediliyor...' },
-  get_watchlist: { name: 'Takip Listesi', description: 'Takip listesi kontrol ediliyor...' },
-  add_to_watchlist: { name: 'Takibe Ekle', description: 'Hisse takibe ekleniyor...' },
-  remove_from_watchlist: { name: 'Takipten Çık', description: 'Hisse takipten çıkarılıyor...' },
-  web_search: { name: 'Web Araması', description: 'Web\'de arama yapılıyor...' },
-  get_kap_data: { name: 'KAP Verileri', description: 'KAP bildirimleri alınıyor...' },
-  get_news: { name: 'Haberler', description: 'Finansal haberler alınıyor...' },
-  analyze_chart_image: { name: 'Grafik Analizi', description: 'Grafik analiz ediliyor...' },
-  read_txt_file: { name: 'TXT Analizi', description: 'Dosya analiz ediliyor...' },
+  get_stock_price:         { name: 'Hisse Fiyatı',    description: 'BIST güncel fiyat verisi alınıyor...' },
+  get_stock_history:       { name: 'Geçmiş Veri',     description: 'BIST tarihsel veriler analiz ediliyor...' },
+  get_global_quote:        { name: 'Global Fiyat',    description: 'Global hisse fiyatı yfinance\'tan alınıyor...' },
+  get_global_history:      { name: 'Global Geçmiş',   description: 'Global tarihsel veri analiz ediliyor...' },
+  get_financials:          { name: 'Finansallar',     description: 'Bilanço ve gelir tablosu alınıyor...' },
+  get_options:             { name: 'Opsiyon Zinciri', description: 'Opsiyon verileri alınıyor...' },
+  search_ticker:           { name: 'Sembol Ara',      description: 'Hisse sembolü aranıyor...' },
+  compare_stocks:          { name: 'Karşılaştırma',   description: 'Hisseler karşılaştırılıyor...' },
+  get_watchlist:           { name: 'Takip Listesi',   description: 'Takip listesi kontrol ediliyor...' },
+  add_to_watchlist:        { name: 'Takibe Ekle',     description: 'Hisse takibe ekleniyor...' },
+  remove_from_watchlist:   { name: 'Takipten Çık',    description: 'Hisse takipten çıkarılıyor...' },
+  web_search:              { name: 'Web Araması',     description: 'Web\'de arama yapılıyor...' },
+  get_kap_data:            { name: 'KAP Verileri',    description: 'KAP bildirimleri alınıyor...' },
+  get_news:                { name: 'Haberler',        description: 'Finansal haberler alınıyor...' },
+  analyze_chart_image:     { name: 'Grafik Analizi',  description: 'Grafik analiz ediliyor...' },
+  read_txt_file:           { name: 'TXT Analizi',     description: 'Dosya analiz ediliyor...' },
 };
+
+// OpenAI-style tool schema for the autonomous agent loop
+const TOOL_SCHEMAS = [
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_price',
+      description: 'Get current BIST (Borsa İstanbul) stock price and basic info.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'BIST ticker symbol e.g. THYAO, GARAN' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_stock_history',
+      description: 'Get BIST stock historical data and technical indicators (SMA, RSI, trend).',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'BIST ticker symbol' },
+          period: { type: 'string', enum: ['1M', '3M', '6M', '1Y'], description: 'Time period' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_global_quote',
+      description: 'Get current global stock/ETF/crypto quote via yfinance (Yahoo Finance). Use for AAPL, TSLA, MSFT, BTC-USD, SPY, etc.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Yahoo Finance symbol e.g. AAPL, TSLA, BTC-USD, SPY, QQQ' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_global_history',
+      description: 'Get historical price data and technical analysis for global stocks via yfinance.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Yahoo Finance symbol' },
+          period: { type: 'string', enum: ['1mo', '3mo', '6mo', '1y', '2y', '5y'], description: 'Time period' },
+          interval: { type: 'string', enum: ['1d', '1wk', '1mo'], description: 'Bar interval' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_financials',
+      description: 'Get financial statements (income statement, balance sheet, cash flow) for a global stock.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Yahoo Finance symbol' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_options',
+      description: 'Get options chain data for a global stock.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Yahoo Finance symbol' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_ticker',
+      description: 'Search for a ticker symbol by company name.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Company name or partial symbol' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'compare_stocks',
+      description: 'Compare performance of multiple global stocks over a period.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbols: { type: 'string', description: 'Comma-separated symbols e.g. AAPL,MSFT,GOOG' },
+          period: { type: 'string', enum: ['1mo', '3mo', '6mo', '1y'], description: 'Time period' }
+        },
+        required: ['symbols']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web for latest financial news, analysis, or any information.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search query' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_news',
+      description: 'Get latest financial news for a specific stock or general BIST market.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'Optional stock symbol. Leave empty for general market news.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_kap_data',
+      description: 'Get KAP (Public Disclosure Platform) announcements for a BIST stock.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string', description: 'BIST ticker symbol' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_watchlist',
+      description: 'Get the user\'s current watchlist.',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_to_watchlist',
+      description: 'Add a stock to the user\'s watchlist.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string' },
+          name: { type: 'string' }
+        },
+        required: ['symbol', 'name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remove_from_watchlist',
+      description: 'Remove a stock from the user\'s watchlist.',
+      parameters: {
+        type: 'object',
+        properties: {
+          symbol: { type: 'string' }
+        },
+        required: ['symbol']
+      }
+    }
+  },
+];
 
 // ============================================
 // CACHE
@@ -82,8 +287,14 @@ async function getCurrentUserId(): Promise<string | null> {
   }
 }
 
+function getBaseUrl(): string {
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  if (process.env.NEXT_PUBLIC_APP_URL) return process.env.NEXT_PUBLIC_APP_URL;
+  return 'http://localhost:3000';
+}
+
 // ============================================
-// TOOL IMPLEMENTATIONS
+// BIST TOOL IMPLEMENTATIONS
 // ============================================
 
 async function getStockPrice(symbol: string): Promise<ToolResult> {
@@ -98,7 +309,7 @@ async function getStockPrice(symbol: string): Promise<ToolResult> {
     const response = await fetch(`https://api.asenax.com/bist/get/${symbol.toUpperCase()}`);
     const data = await response.json();
 
-    if (data.code === "0" && data.data?.hisseYuzeysel) {
+    if (data.code === '0' && data.data?.hisseYuzeysel) {
       const d = data.data.hisseYuzeysel;
       const result: ToolResult = {
         success: true,
@@ -114,7 +325,8 @@ async function getStockPrice(symbol: string): Promise<ToolResult> {
           open: d.acilis,
           previousClose: d.dunkukapanis,
           ceiling: d.tavan,
-          floor: d.taban
+          floor: d.taban,
+          market: 'BIST',
         },
         _meta: { tool: 'get_stock_price', duration: Date.now() - startTime }
       };
@@ -145,23 +357,10 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
 
     if (data.body) {
       const historical = Object.values(data.body as Record<string, {
-        date: string;
-        date_utc: number;
-        open: number;
-        high: number;
-        low: number;
-        close: number;
-        volume: number;
+        date: string; date_utc: number; open: number; high: number; low: number; close: number; volume: number;
       }>)
         .filter((e) => e.date_utc >= cutoff)
-        .map((e) => ({
-          date: e.date,
-          open: e.open,
-          high: e.high,
-          low: e.low,
-          close: e.close,
-          volume: e.volume
-        }))
+        .map((e) => ({ date: e.date, open: e.open, high: e.high, low: e.low, close: e.close, volume: e.volume }))
         .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
       const closes = historical.map(h => h.close);
@@ -197,7 +396,8 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
           trend: sma20 && sma50 ? (sma20 > sma50 ? 'BULLISH' : 'BEARISH') : 'NEUTRAL',
           priceChange: Math.round(priceChange * 100) / 100,
           lastPrice,
-          firstPrice
+          firstPrice,
+          market: 'BIST',
         },
         _meta: { tool: 'get_stock_history', duration: Date.now() - startTime }
       };
@@ -208,20 +408,67 @@ async function getStockHistory(symbol: string, period: string = '1M'): Promise<T
   }
 }
 
+// ============================================
+// YFINANCE TOOL IMPLEMENTATIONS (via mini-service)
+// ============================================
+
+async function callYFinance(action: string, params: Record<string, string>): Promise<ToolResult> {
+  const startTime = Date.now();
+  try {
+    const baseUrl = getBaseUrl();
+    const url = new URL(`${baseUrl}/api/yfinance`);
+    url.searchParams.set('action', action);
+    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+
+    const response = await fetch(url.toString(), { signal: AbortSignal.timeout(15000) });
+    const data = await response.json();
+
+    if (!response.ok || data.error) {
+      return { success: false, error: data.error || 'yfinance service error', _meta: { tool: action, duration: Date.now() - startTime } };
+    }
+
+    return { success: true, data, _meta: { tool: action, duration: Date.now() - startTime } };
+  } catch (error) {
+    return { success: false, error: String(error), _meta: { tool: action, duration: Date.now() - startTime } };
+  }
+}
+
+async function getGlobalQuote(symbol: string): Promise<ToolResult> {
+  return callYFinance('quote', { symbol });
+}
+
+async function getGlobalHistory(symbol: string, period = '3mo', interval = '1d'): Promise<ToolResult> {
+  return callYFinance('history', { symbol, period, interval });
+}
+
+async function getFinancials(symbol: string): Promise<ToolResult> {
+  return callYFinance('financials', { symbol });
+}
+
+async function getOptions(symbol: string): Promise<ToolResult> {
+  return callYFinance('options', { symbol });
+}
+
+async function searchTicker(query: string): Promise<ToolResult> {
+  return callYFinance('search', { q: query });
+}
+
+async function compareStocks(symbols: string, period = '3mo'): Promise<ToolResult> {
+  return callYFinance('compare', { symbols, period });
+}
+
+// ============================================
+// WATCHLIST & SOCIAL TOOLS
+// ============================================
+
 async function getWatchlist(userId: string | null): Promise<ToolResult> {
   const startTime = Date.now();
   try {
     const supabase = getSupabase();
     let query = supabase.from('watchlist').select('*').order('created_at', { ascending: false });
-    
-    if (userId) {
-      query = query.eq('user_id', userId);
-    } else {
-      query = query.is('user_id', null);
-    }
-    
+    if (userId) query = query.eq('user_id', userId);
+    else query = query.is('user_id', null);
     const { data, error } = await query;
-
     if (error) throw error;
     return { success: true, data: data || [], _meta: { tool: 'get_watchlist', duration: Date.now() - startTime } };
   } catch (error) {
@@ -238,7 +485,6 @@ async function addToWatchlist(symbol: string, name: string, userId: string | nul
       .insert({ symbol: symbol.toUpperCase(), name, user_id: userId })
       .select()
       .single();
-
     if (error && error.code !== '23505') throw error;
     return { success: true, data, _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
   } catch (error) {
@@ -251,13 +497,8 @@ async function removeFromWatchlist(symbol: string, userId: string | null): Promi
   try {
     const supabase = getSupabase();
     let query = supabase.from('watchlist').delete().eq('symbol', symbol.toUpperCase());
-    
-    if (userId) {
-      query = query.eq('user_id', userId);
-    } else {
-      query = query.is('user_id', null);
-    }
-    
+    if (userId) query = query.eq('user_id', userId);
+    else query = query.is('user_id', null);
     const { error } = await query;
     if (error) throw error;
     return { success: true, _meta: { tool: 'remove_from_watchlist', duration: Date.now() - startTime } };
@@ -265,6 +506,10 @@ async function removeFromWatchlist(symbol: string, userId: string | null): Promi
     return { success: false, error: String(error), _meta: { tool: 'remove_from_watchlist', duration: Date.now() - startTime } };
   }
 }
+
+// ============================================
+// WEB SEARCH & NEWS TOOLS
+// ============================================
 
 async function webSearch(query: string): Promise<ToolResult> {
   const startTime = Date.now();
@@ -293,59 +538,31 @@ async function getNews(symbol?: string): Promise<ToolResult> {
   const startTime = Date.now();
   try {
     const zai = await ZAI.create();
-    
-    // BIST haber kaynaklarından arama
-    const queries = symbol 
-      ? [
-          `${symbol} hisse haberi son dakika`,
-          `${symbol} borsa analizi yorum`,
-          `KAP ${symbol} bildirim`
-        ]
-      : [
-          'BIST 100 borsa haberi bugün',
-          'Türkiye borsa son dakika',
-          'BIST piyasa analizi'
-        ];
-    
-    // Paralel arama
-    const searchPromises = queries.map(q => 
-      zai.functions.invoke('web_search', { query: q, num: 5 })
-    );
-    
-    const results = await Promise.all(searchPromises);
-    
-    // Sonuçları birleştir ve tekrarları kaldır
+    const queries = symbol
+      ? [`${symbol} hisse haberi son dakika`, `${symbol} borsa analizi yorum`, `KAP ${symbol} bildirim`]
+      : ['BIST 100 borsa haberi bugün', 'Türkiye borsa son dakika', 'BIST piyasa analizi'];
+
+    const results = await Promise.all(queries.map(q => zai.functions.invoke('web_search', { query: q, num: 5 })));
+
     const allNews: Array<{ title: string; summary: string; source: string; url: string; date?: string }> = [];
     const seen = new Set<string>();
-    
+
     for (const result of results) {
       if (Array.isArray(result)) {
         for (const item of result) {
           const title = item.name || item.title || '';
           if (title && !seen.has(title)) {
             seen.add(title);
-            allNews.push({
-              title,
-              summary: item.snippet || item.description || '',
-              source: item.host_name || 'BIST',
-              url: item.url || '',
-              date: item.date
-            });
+            allNews.push({ title, summary: item.snippet || item.description || '', source: item.host_name || 'BIST', url: item.url || '', date: item.date });
           }
         }
       }
     }
-    
-    // Son 10 haberi döndür
-    return { 
-      success: true, 
-      data: {
-        symbol: symbol || 'BIST 100',
-        news: allNews.slice(0, 10),
-        total: allNews.length,
-        timestamp: new Date().toISOString()
-      }, 
-      _meta: { tool: 'get_news', duration: Date.now() - startTime } 
+
+    return {
+      success: true,
+      data: { symbol: symbol || 'BIST 100', news: allNews.slice(0, 10), total: allNews.length, timestamp: new Date().toISOString() },
+      _meta: { tool: 'get_news', duration: Date.now() - startTime }
     };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'get_news', duration: Date.now() - startTime } };
@@ -360,7 +577,7 @@ async function analyzeChartImage(imageBase64: string, symbol?: string): Promise<
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: `Bu finansal grafiği analiz et. ${symbol ? `Hisse: ${symbol}` : ''}` },
+          { type: 'text', text: `Bu finansal grafiği detaylıca analiz et. ${symbol ? `Hisse: ${symbol}` : ''}\n\nAnaliz şunları içermeli:\n- Trend yönü ve gücü\n- Destek/direnç seviyeleri\n- Teknik formasyonlar (varsa)\n- Hacim analizi\n- Genel yorum` },
           { type: 'image_url', image_url: { url: imageBase64.startsWith('data:') ? imageBase64 : `data:image/png;base64,${imageBase64}` } }
         ]
       }],
@@ -383,7 +600,7 @@ async function readTxtFile(content: string, filename?: string): Promise<ToolResu
     const zai = await ZAI.create();
     const response = await zai.chat.completions.create({
       messages: [
-        { role: 'system', content: 'Sen finansal analiz asistanısın. TXT dosyasını analiz et.' },
+        { role: 'system', content: 'Sen finansal analiz asistanısın. TXT dosyasını analiz et ve önemli bilgileri çıkar.' },
         { role: 'user', content: `Dosya: ${filename || 'bilinmiyor'}\n\n${content.slice(0, 8000)}` }
       ],
       max_tokens: 1500
@@ -400,7 +617,7 @@ async function readTxtFile(content: string, filename?: string): Promise<ToolResu
 }
 
 // ============================================
-// TOOL EXECUTOR
+// UNIFIED TOOL EXECUTOR
 // ============================================
 
 async function executeTool(toolName: string, params: Record<string, unknown>, userId: string | null): Promise<ToolResult> {
@@ -409,6 +626,18 @@ async function executeTool(toolName: string, params: Record<string, unknown>, us
       return getStockPrice(params.symbol as string);
     case 'get_stock_history':
       return getStockHistory(params.symbol as string, params.period as string);
+    case 'get_global_quote':
+      return getGlobalQuote(params.symbol as string);
+    case 'get_global_history':
+      return getGlobalHistory(params.symbol as string, params.period as string, params.interval as string);
+    case 'get_financials':
+      return getFinancials(params.symbol as string);
+    case 'get_options':
+      return getOptions(params.symbol as string);
+    case 'search_ticker':
+      return searchTicker(params.query as string);
+    case 'compare_stocks':
+      return compareStocks(params.symbols as string, params.period as string);
     case 'get_watchlist':
       return getWatchlist(userId);
     case 'add_to_watchlist':
@@ -421,229 +650,249 @@ async function executeTool(toolName: string, params: Record<string, unknown>, us
       return getKapData(params.symbol as string | undefined);
     case 'get_news':
       return getNews(params.symbol as string | undefined);
-    case 'analyze_chart_image':
-      return analyzeChartImage(params.imageBase64 as string, params.symbol as string | undefined);
-    case 'read_txt_file':
-      return readTxtFile(params.content as string, params.filename as string | undefined);
     default:
       return { success: false, error: `Bilinmeyen araç: ${toolName}` };
   }
 }
 
 // ============================================
-// QUERY ANALYZER
+// OPEN AGENT LOOP (Autonomous Tool-Calling)
 // ============================================
 
-function analyzeQuery(message: string): { type: string; symbols: string[]; tools: string[] } {
-  const upperMessage = message.toUpperCase();
-  const symbols = [...new Set(upperMessage.match(/\b([A-Z]{3,5})\b/g) || [])].filter(s => s.length >= 3 && s.length <= 5);
-
-  let type = 'general';
-  let tools: string[] = [];
-
-  if (/(haber|son dakika|duyuru|gelişme)/i.test(message)) {
-    type = 'news';
-    tools = ['get_news'];
-  } else if (/(tahmin|gelecek|ne olur|kaç olur|gün sonra)/i.test(message)) {
-    type = 'price_prediction';
-    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'get_news'];
-  } else if (/satmalı|satsam|satayım/i.test(message)) {
-    type = 'sell_decision';
-    tools = ['get_stock_price', 'get_stock_history', 'get_kap_data', 'get_news'];
-  } else if (/nereye|yatırım|öneri|hangi hisse/i.test(message)) {
-    type = 'market_overview';
-    tools = ['get_news'];
-  } else if (/analiz|incele|detay/i.test(message)) {
-    type = 'analysis';
-    tools = symbols.length > 0 ? ['get_stock_price', 'get_stock_history', 'get_kap_data', 'get_news'] : ['get_news'];
-  } else if (/takip|listem|watchlist/i.test(message)) {
-    type = 'watchlist';
-    tools = ['get_watchlist'];
-  } else if (symbols.length > 0) {
-    type = 'stock_price';
-    tools = ['get_stock_price', 'get_stock_history', 'get_news'];
-  } else {
-    tools = ['get_news'];
-  }
-
-  return { type, symbols, tools };
+interface AgentMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  tool_call_id?: string;
+  name?: string;
 }
 
-// ============================================
-// LLM RESPONSE GENERATOR (Z-AI SDK)
-// ============================================
+interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+}
 
-async function generateLLMResponse(
+async function runOpenAgentLoop(
   userMessage: string,
-  queryType: string,
-  toolResults: Map<string, ToolResult>
-): Promise<string> {
-  // Tool sonuçlarını hazırla
-  const contextData: string[] = [];
-  
-  const priceResult = toolResults.get('get_stock_price');
-  if (priceResult?.success && priceResult.data) {
-    const d = priceResult.data as Record<string, unknown>;
-    contextData.push(`📊 HİSSE FİYAT BİLGİSİ:
-Sembol: ${d.symbol}
-Ad: ${d.name}
-Güncel Fiyat: ${d.price} ₺
-Değişim: ${d.change} ₺ (${d.changePercent}%)
-Günlük Yüksek/Düşük: ${d.high}/${d.low} ₺
-Hacim: ${d.volume} lot
-Tavan/Taban: ${d.ceiling}/${d.floor} ₺`);
-  }
+  userId: string | null,
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  encoder: { encode: (msg: SSEMessage) => Uint8Array }
+): Promise<{ response: string; toolsUsed: string[] }> {
+  const zai = await ZAI.create();
+  const toolsUsed: string[] = [];
+  const toolResultsMap = new Map<string, ToolResult>();
 
-  const historyResult = toolResults.get('get_stock_history');
-  if (historyResult?.success && historyResult.data) {
-    const d = historyResult.data as Record<string, unknown>;
-    const indicators = d.indicators as Record<string, number | null>;
-    contextData.push(`📈 TEKNİK ANALİZ:
-SMA 20: ${indicators?.sma20 || 'N/A'} ₺
-SMA 50: ${indicators?.sma50 || 'N/A'} ₺
-RSI 14: ${indicators?.rsi || 'N/A'}
-Trend: ${d.trend === 'BULLISH' ? 'Yükseliş' : d.trend === 'BEARISH' ? 'Düşüş' : 'Yatay'}
-Dönem Değişimi: ${d.priceChange}%`);
-  }
+  const systemPrompt = `Sen profesyonel bir yatırım analiz asistanısın. Hem BIST (Borsa İstanbul) hem de global piyasalarda (NYSE, NASDAQ, kripto) analiz yapabilirsin.
 
-  const marketResult = toolResults.get('scan_market');
-  if (marketResult?.success && marketResult.data) {
-    const d = marketResult.data as Record<string, unknown>;
-    const gainers = d.gainers as Array<Record<string, unknown>>;
-    const losers = d.losers as Array<Record<string, unknown>>;
-    
-    contextData.push(`📊 PİYASA TARAMASI (${d.total} hisse):
-YÜKSELENLER: ${gainers?.slice(0, 5).map((g) => `${g.code}: ${g.price}₺ (+${g.changePercent}%)`).join(', ') || 'Yok'}
-DÜŞENLER: ${losers?.slice(0, 5).map((l) => `${l.code}: ${l.price}₺ (${l.changePercent}%)`).join(', ') || 'Yok'}`);
-  }
-
-  const webResult = toolResults.get('web_search');
-  if (webResult?.success && webResult.data) {
-    const results = webResult.data as Array<{ name?: string; snippet?: string }>;
-    if (Array.isArray(results) && results.length > 0) {
-      contextData.push(`🔍 WEB ARAMA: ${results.slice(0, 3).map((r) => r.name || r.snippet || '').join(' | ')}`);
-    }
-  }
-
-  const kapResult = toolResults.get('get_kap_data');
-  if (kapResult?.success && kapResult.data) {
-    const results = kapResult.data as Array<{ name?: string; snippet?: string }>;
-    if (Array.isArray(results) && results.length > 0) {
-      contextData.push(`📢 KAP BİLDİRİMLERİ: ${results.slice(0, 3).map((r) => r.name || r.snippet || '').join(' | ')}`);
-    }
-  }
-
-  const newsResult = toolResults.get('get_news');
-  if (newsResult?.success && newsResult.data) {
-    const data = newsResult.data as { news?: Array<{ title: string; summary: string; source: string }> };
-    if (data.news && data.news.length > 0) {
-      contextData.push(`📰 HABERLER (${data.news.length} adet):
-${data.news.slice(0, 5).map((n, i) => `${i + 1}. ${n.title} (${n.source})`).join('\n')}`);
-    }
-  }
-
-  const watchlistResult = toolResults.get('get_watchlist');
-  if (watchlistResult?.success && watchlistResult.data) {
-    const items = watchlistResult.data as Array<{ symbol: string; name?: string }>;
-    if (Array.isArray(items) && items.length > 0) {
-      contextData.push(`⭐ TAKİP LİSTESİ: ${items.map((item) => item.symbol).join(', ')}`);
-    }
-  }
-
-  const systemPrompt = `Sen profesyonel bir BIST (Borsa İstanbul) yatırım analiz asistanısın.
+YETENEKLERIN:
+- BIST hisse fiyat ve teknik analizi (get_stock_price, get_stock_history)
+- Global hisse/ETF/kripto analizi via yfinance (get_global_quote, get_global_history)
+- Finansal tablolar analizi (get_financials)
+- Opsiyon zinciri analizi (get_options)
+- Hisse sembolü arama (search_ticker)
+- Hisse karşılaştırma (compare_stocks)
+- Web'de güncel haber ve analiz arama (web_search, get_news)
+- KAP bildirimleri (get_kap_data)
+- Takip listesi yönetimi (get_watchlist, add_to_watchlist, remove_from_watchlist)
 
 KURALLAR:
-1. Türkçe yanıt ver
-2. Markdown kullan (başlıklar ##, kalın **, listeler -)
-3. Emoji kullan (📊 📈 🔴 🟢 ⚠️)
-4. Asla "al/sat" tavsiyesi verme
-5. Sadece analitik yorum yap
-6. Teknik göstergeleri açıkla (RSI, SMA, Trend)
-7. Risk faktörlerini belirt
-8. Sonuna uyarı ekle: "⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir."
+1. Kullanıcının sorusunu anlamak için gerekli araçları kullan
+2. Birden fazla araç kullanabilirsin - kapsamlı analiz için önce veri topla
+3. BIST hisseleri için BIST araçlarını, global hisseler için yfinance araçlarını kullan
+4. Türkçe yanıt ver, Markdown kullan
+5. Asla kesin "al/sat" tavsiyesi verme
+6. Teknik analizi yorumla: RSI, SMA, MACD, Bollinger Bands, trend
+7. Sonuna uyarı ekle: "⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir."
+8. Global semboller: AAPL, TSLA, MSFT, GOOG, AMZN, BTC-USD, ETH-USD, SPY, QQQ vs.
+9. BIST semboller: THYAO, GARAN, ASELS, SISE, EREGL vs.`;
 
-YANIT FORMATI:
-- Kısa başlık
-- Önemli veriler (fiyat, değişim)
-- Teknik analiz yorumu
-- Risk değerlendirmesi
-- Uyarı`;
+  const messages: AgentMessage[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage }
+  ];
 
-  const userPrompt = `Kullanıcı Sorusu: ${userMessage}
+  const MAX_ITERATIONS = 6;
 
-Sorgu Tipi: ${queryType}
+  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    // Call LLM with tool schemas
+    let llmResponse: { choices?: Array<{ message?: { content?: string; tool_calls?: ToolCall[] }; finish_reason?: string }> };
 
-VERİLER:
-${contextData.join('\n\n')}
-
-Lütfen bu verilere dayanarak profesyonel bir analiz yap.`;
-
-  try {
-    const zai = await ZAI.create();
-    const response = await zai.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      max_tokens: 2000,
-      temperature: 0.7
-    });
-
-    if (response.choices?.[0]?.message?.content) {
-      return response.choices[0].message.content;
+    try {
+      llmResponse = await (zai.chat.completions as unknown as {
+        create: (opts: unknown) => Promise<typeof llmResponse>
+      }).create({
+        messages,
+        tools: TOOL_SCHEMAS,
+        tool_choice: iteration === 0 ? 'auto' : 'auto',
+        max_tokens: 2500,
+        temperature: 0.3,
+      });
+    } catch {
+      // Fallback: LLM without tool calling
+      const fallbackResp = await zai.chat.completions.create({
+        messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+        max_tokens: 2000,
+        temperature: 0.5,
+      });
+      return {
+        response: fallbackResp.choices?.[0]?.message?.content || 'Analiz tamamlandı.',
+        toolsUsed
+      };
     }
-    
-    return generateFallbackResponse(queryType, toolResults);
-  } catch (error) {
-    console.error('LLM error:', error);
-    return generateFallbackResponse(queryType, toolResults);
+
+    const choice = llmResponse.choices?.[0];
+    if (!choice) break;
+
+    const assistantMessage = choice.message;
+    const finishReason = choice.finish_reason;
+
+    // If no more tool calls, return the final response
+    if (finishReason === 'stop' || !assistantMessage?.tool_calls?.length) {
+      return {
+        response: assistantMessage?.content || generateContextualResponse(toolResultsMap),
+        toolsUsed
+      };
+    }
+
+    // Process tool calls
+    const toolCalls = assistantMessage.tool_calls || [];
+
+    // Add assistant message with tool calls to history
+    messages.push({
+      role: 'assistant',
+      content: assistantMessage.content || '',
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } as unknown as object : {})
+    } as AgentMessage);
+
+    // Execute each tool call
+    for (const toolCall of toolCalls) {
+      const toolName = toolCall.function.name;
+      let params: Record<string, unknown> = {};
+
+      try {
+        params = JSON.parse(toolCall.function.arguments);
+      } catch {
+        params = {};
+      }
+
+      const toolInfo = TOOLS_INFO[toolName] || { name: toolName, description: `${toolName} çalışıyor...` };
+
+      // Emit tool_start
+      await writer.write(encoder.encode({
+        type: 'tool_start',
+        data: { tool: toolName, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
+      }));
+
+      // Execute tool
+      const result = await executeTool(toolName, params, userId);
+      toolsUsed.push(toolName);
+      toolResultsMap.set(toolName, result);
+
+      // Emit tool_result
+      await writer.write(encoder.encode({
+        type: 'tool_result',
+        data: {
+          tool: toolName,
+          status: result.success ? 'completed' : 'error',
+          result: result.data,
+          message: result.success
+            ? `${toolInfo.name} tamamlandı (${result._meta?.duration}ms)`
+            : result.error
+        }
+      }));
+
+      // Add tool result to message history
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        name: toolName,
+        content: result.success
+          ? JSON.stringify(result.data).slice(0, 3000)
+          : `Error: ${result.error}`
+      });
+    }
   }
+
+  // Max iterations reached - generate final response from collected data
+  const finalResp = await zai.chat.completions.create({
+    messages: [
+      ...messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+      { role: 'user', content: 'Tüm verileri analiz ederek kapsamlı bir sonuç yaz.' }
+    ],
+    max_tokens: 2000,
+    temperature: 0.5,
+  });
+
+  return {
+    response: finalResp.choices?.[0]?.message?.content || generateContextualResponse(toolResultsMap),
+    toolsUsed
+  };
 }
 
 // ============================================
-// FALLBACK RESPONSE
+// CONTEXT-AWARE FALLBACK RESPONSE
 // ============================================
 
-function generateFallbackResponse(queryType: string, toolResults: Map<string, ToolResult>): string {
-  const formatNumber = (n: number) => n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function generateContextualResponse(toolResults: Map<string, ToolResult>): string {
+  const fmt = (n: number) => n.toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   let response = '';
 
+  // BIST price
   const priceResult = toolResults.get('get_stock_price');
   if (priceResult?.success && priceResult.data) {
-    const d = priceResult.data as { symbol: string; name: string; price: number; changePercent: number; change: number; volume: number; high: number; low: number };
+    const d = priceResult.data as { symbol: string; name: string; price: number; changePercent: number; change: number; volume: number };
     response += `## 📊 ${d.symbol} - ${d.name}\n\n`;
-    response += `**Fiyat:** ${formatNumber(d.price)} ₺\n`;
-    response += `**Değişim:** ${d.changePercent >= 0 ? '+' : ''}${formatNumber(d.changePercent)}%\n`;
+    response += `**Fiyat:** ${fmt(d.price)} ₺  **Değişim:** ${d.changePercent >= 0 ? '+' : ''}${fmt(d.changePercent)}%\n`;
     response += `**Hacim:** ${d.volume?.toLocaleString('tr-TR') || 0} lot\n\n`;
   }
 
-  const historyResult = toolResults.get('get_stock_history');
-  if (historyResult?.success && historyResult.data) {
-    const d = historyResult.data as { indicators: { sma20: number | null; sma50: number | null; rsi: number | null }; trend: string; priceChange: number };
-    response += `## 📈 Teknik Analiz\n\n`;
-    if (d.indicators?.sma20) response += `**SMA 20:** ${formatNumber(d.indicators.sma20)} ₺\n`;
-    if (d.indicators?.sma50) response += `**SMA 50:** ${formatNumber(d.indicators.sma50)} ₺\n`;
-    if (d.indicators?.rsi) response += `**RSI 14:** ${formatNumber(d.indicators.rsi)}\n`;
-    response += `**Trend:** ${d.trend === 'BULLISH' ? '🟢 Yükseliş' : d.trend === 'BEARISH' ? '🔴 Düşüş' : '🟡 Yatay'}\n\n`;
+  // Global quote
+  const globalResult = toolResults.get('get_global_quote');
+  if (globalResult?.success && globalResult.data) {
+    const d = globalResult.data as { symbol: string; name: string; price: number; previousClose: number; currency: string; marketCap: number; peRatio: number };
+    if (d.price) {
+      const chg = d.previousClose ? ((d.price - d.previousClose) / d.previousClose * 100) : 0;
+      response += `## 🌍 ${d.symbol} - ${d.name}\n\n`;
+      response += `**Fiyat:** ${d.price} ${d.currency || 'USD'}  **Değişim:** ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%\n`;
+      if (d.marketCap) response += `**Piyasa Değeri:** $${(d.marketCap / 1e9).toFixed(2)}B\n`;
+      if (d.peRatio) response += `**F/K Oranı:** ${d.peRatio}\n`;
+      response += '\n';
+    }
   }
 
-  const marketResult = toolResults.get('scan_market');
-  if (marketResult?.success && marketResult.data) {
-    const d = marketResult.data as { gainers: Array<{ code: string; price: number; changePercent: number }>; losers: Array<{ code: string; price: number; changePercent: number }>; total: number };
-    response += `## 📊 Piyasa Özeti (${d.total} hisse)\n\n`;
-    response += `### 🟢 Yükselenler\n`;
-    d.gainers.slice(0, 5).forEach((g, i) => {
-      response += `${i + 1}. **${g.code}** - ${formatNumber(g.price)} ₺ (+${formatNumber(g.changePercent)}%)\n`;
-    });
-    response += `\n### 🔴 Düşenler\n`;
-    d.losers.slice(0, 5).forEach((l, i) => {
-      response += `${i + 1}. **${l.code}** - ${formatNumber(l.price)} ₺ (${formatNumber(l.changePercent)}%)\n`;
-    });
-    response += `\n`;
+  // Technical analysis (BIST or global)
+  for (const key of ['get_stock_history', 'get_global_history']) {
+    const histResult = toolResults.get(key);
+    if (histResult?.success && histResult.data) {
+      const d = histResult.data as { indicators: { sma20: number | null; sma50: number | null; rsi: number | null; macd?: number }; trend: string; priceChange: number };
+      response += `## 📈 Teknik Analiz\n\n`;
+      if (d.indicators?.sma20) response += `**SMA 20:** ${fmt(d.indicators.sma20)}\n`;
+      if (d.indicators?.sma50) response += `**SMA 50:** ${fmt(d.indicators.sma50)}\n`;
+      if (d.indicators?.rsi) {
+        const rsi = d.indicators.rsi;
+        const rsiStatus = rsi > 70 ? '⚠️ Aşırı Alım' : rsi < 30 ? '⚠️ Aşırı Satım' : '✅ Normal';
+        response += `**RSI 14:** ${fmt(rsi)} ${rsiStatus}\n`;
+      }
+      if (d.indicators?.macd !== undefined) response += `**MACD:** ${fmt(d.indicators.macd || 0)}\n`;
+      response += `**Trend:** ${d.trend === 'BULLISH' ? '🟢 Yükseliş' : d.trend === 'BEARISH' ? '🔴 Düşüş' : '🟡 Yatay'}\n`;
+      response += `**Dönem Değişimi:** ${d.priceChange >= 0 ? '+' : ''}${d.priceChange}%\n\n`;
+      break;
+    }
+  }
+
+  // News
+  const newsResult = toolResults.get('get_news');
+  if (newsResult?.success && newsResult.data) {
+    const data = newsResult.data as { news?: Array<{ title: string; source: string }> };
+    if (data.news?.length) {
+      response += `## 📰 Son Haberler\n\n`;
+      data.news.slice(0, 5).forEach((n, i) => { response += `${i + 1}. ${n.title} *(${n.source})*\n`; });
+      response += '\n';
+    }
   }
 
   response += `\n---\n⚠️ Bu analiz bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.`;
-  return response || 'Veri bulundu.';
+  return response || 'Analiz tamamlandı.';
 }
 
 // ============================================
@@ -657,11 +906,9 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
 
-    // Create a TransformStream for SSE
     const stream = new TransformStream();
     const writer = stream.writable.getWriter();
 
-    // Process in background
     (async () => {
       try {
         // TXT file analysis
@@ -670,19 +917,15 @@ export async function POST(request: NextRequest) {
             type: 'tool_start',
             data: { tool: 'read_txt_file', status: 'running', message: TOOLS_INFO.read_txt_file.description }
           }));
-
           const result = await readTxtFile(body.txtContent, body.txtFilename);
-
           await writer.write(encoder.encode({
             type: 'tool_result',
             data: { tool: 'read_txt_file', status: result.success ? 'completed' : 'error', result: result.data, message: result.success ? 'Analiz tamamlandı' : result.error }
           }));
-
           await writer.write(encoder.encode({
             type: 'complete',
             data: { response: result.success ? (result.data as { analysis: string }).analysis : result.error, toolsUsed: ['read_txt_file'] }
           }));
-
           await writer.close();
           return;
         }
@@ -693,19 +936,15 @@ export async function POST(request: NextRequest) {
             type: 'tool_start',
             data: { tool: 'analyze_chart_image', status: 'running', message: TOOLS_INFO.analyze_chart_image.description }
           }));
-
           const result = await analyzeChartImage(body.imageBase64, body.imageSymbol);
-
           await writer.write(encoder.encode({
             type: 'tool_result',
             data: { tool: 'analyze_chart_image', status: result.success ? 'completed' : 'error', result: result.data, message: result.success ? 'Analiz tamamlandı' : result.error }
           }));
-
           await writer.write(encoder.encode({
             type: 'complete',
             data: { response: result.success ? (result.data as { analysis: string }).analysis : result.error, toolsUsed: ['analyze_chart_image'] }
           }));
-
           await writer.close();
           return;
         }
@@ -718,132 +957,74 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        // Auth kontrolü - kayıtsız kullanıcı sadece temel bilgileri görebilir
+        // Guest users: basic info only
         if (!userId) {
           const upperMessage = message.toUpperCase();
-          const symbols = [...new Set(upperMessage.match(/\b([A-Z]{3,5})\b/g) || [])].filter(s => s.length >= 3 && s.length <= 5);
-          
-          // Sadece fiyat ve haber göster
+          const rawMatches: string[] = upperMessage.match(/\b([A-Z]{3,5})\b/g) || [];
+          const symbols: string[] = [...new Set(rawMatches)].filter((s: string) => s.length >= 3 && s.length <= 5);
           let basicResponse = '';
-          
+
           if (symbols.length > 0) {
-            // Hisse fiyatı al
             const priceResult = await getStockPrice(symbols[0]);
             if (priceResult.success && priceResult.data) {
               const d = priceResult.data as { symbol: string; name: string; price: number; changePercent: number };
-              basicResponse += `## 📊 ${d.symbol} - ${d.name}\n\n`;
-              basicResponse += `**Fiyat:** ${d.price} ₺\n`;
-              basicResponse += `**Değişim:** ${d.changePercent >= 0 ? '+' : ''}${d.changePercent}%\n\n`;
+              basicResponse += `## 📊 ${d.symbol} - ${d.name}\n\n**Fiyat:** ${d.price} ₺\n**Değişim:** ${d.changePercent >= 0 ? '+' : ''}${d.changePercent}%\n\n`;
             }
-            
-            // Haber al
-            const newsResult = await getNews(symbols[0]);
+            const newsResult = await getNews(symbols[0] as string);
             if (newsResult.success && newsResult.data) {
               const data = newsResult.data as { news?: Array<{ title: string; source: string }> };
-              if (data.news && data.news.length > 0) {
+              if (data.news?.length) {
                 basicResponse += `## 📰 Son Haberler\n\n`;
-                data.news.slice(0, 3).forEach((n, i) => {
-                  basicResponse += `${i + 1}. ${n.title} (${n.source})\n`;
-                });
+                data.news.slice(0, 3).forEach((n, i) => { basicResponse += `${i + 1}. ${n.title} (${n.source})\n`; });
               }
             }
           } else {
-            // Genel haber
             const newsResult = await getNews();
             if (newsResult.success && newsResult.data) {
               const data = newsResult.data as { news?: Array<{ title: string; source: string }> };
               basicResponse = `## 📰 BIST Güncel Haberler\n\n`;
-              if (data.news && data.news.length > 0) {
-                data.news.slice(0, 5).forEach((n, i) => {
-                  basicResponse += `${i + 1}. ${n.title} (${n.source})\n`;
-                });
-              }
+              data.news?.slice(0, 5).forEach((n, i) => { basicResponse += `${i + 1}. ${n.title} (${n.source})\n`; });
             }
           }
-          
-          basicResponse += `\n\n---\n⚠️ **Kayıt olmadan sadece temel bilgileri görebilirsiniz.**\nDetaylı analiz ve yorum için lütfen giriş yapın.`;
-          
+
+          basicResponse += `\n\n---\n⚠️ **Kayıt olmadan sadece temel bilgileri görebilirsiniz.**\nDetaylı analiz için lütfen giriş yapın.`;
           await writer.write(encoder.encode({
             type: 'complete',
-            data: { response: basicResponse, toolsUsed: ['get_stock_price', 'get_news'], queryType: 'basic', symbols, requiresAuth: true }
+            data: { response: basicResponse, toolsUsed: ['get_stock_price', 'get_news'] as string[], queryType: 'basic', symbols, requiresAuth: true }
           }));
-          
           await writer.close();
           return;
         }
 
-        const { type, symbols, tools } = analyzeQuery(message);
-        const toolResults = new Map<string, ToolResult>();
-
         // Send initial progress
         await writer.write(encoder.encode({
           type: 'progress',
-          data: { message: 'Sorgu analiz ediliyor...', tools: tools.join(', ') }
+          data: { message: '🤖 AI Agent başlatıldı, araçlar hazırlanıyor...' }
         }));
 
-        // Execute tools sequentially with progress updates
-        for (const tool of tools) {
-          const toolInfo = TOOLS_INFO[tool] || { name: tool, description: `${tool} çalışıyor...` };
-
-          // Send tool start event
-          await writer.write(encoder.encode({
-            type: 'tool_start',
-            data: { tool, status: 'running', message: `${toolInfo.name}: ${toolInfo.description}` }
-          }));
-
-          // Get params for tool
-          let params: Record<string, unknown> = {};
-          switch (tool) {
-            case 'get_stock_price':
-            case 'get_stock_history':
-            case 'get_kap_data':
-              params = { symbol: symbols[0], period: '1Y' };
-              break;
-            case 'web_search':
-              params = { query: symbols.length > 0 ? `${symbols[0]} hisse analiz` : 'BIST borsa' };
-              break;
-            default:
-              params = {};
-          }
-
-          // Execute tool
-          const result = await executeTool(tool, params, userId);
-          toolResults.set(tool, result);
-
-          // Send tool result event
-          await writer.write(encoder.encode({
-            type: 'tool_result',
-            data: {
-              tool,
-              status: result.success ? 'completed' : 'error',
-              result: result.data,
-              message: result.success ? `${toolInfo.name} tamamlandı (${result._meta?.duration}ms)` : result.error
-            }
-          }));
-        }
-
-        // Send LLM start event
+        // Emit LLM start
         await writer.write(encoder.encode({
           type: 'llm_start',
           data: { message: '🤖 AI analiz yapıyor...' }
         }));
 
-        // Generate LLM response
-        const response = await generateLLMResponse(message, type, toolResults);
+        // Run the open agent loop (autonomous tool selection)
+        const { response, toolsUsed } = await runOpenAgentLoop(message, userId, writer, encoder);
 
         // Send complete event
         await writer.write(encoder.encode({
           type: 'complete',
-          data: { response, toolsUsed: tools, queryType: type, symbols }
+          data: { response, toolsUsed, queryType: 'agent' }
         }));
 
         await writer.close();
       } catch (error) {
+        console.error('Agent loop error:', error);
         await writer.write(encoder.encode({
           type: 'error',
           data: { error: 'İşlem sırasında hata oluştu' }
         }));
-        await writer.close();
+        try { await writer.close(); } catch { /* already closed */ }
       }
     })();
 

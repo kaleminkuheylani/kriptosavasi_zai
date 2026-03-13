@@ -115,6 +115,25 @@ interface HistoricalData {
   volume: number;
 }
 
+interface GlobalQuote {
+  symbol: string;
+  name: string;
+  price: number | null;
+  previousClose: number | null;
+  dayHigh: number | null;
+  dayLow: number | null;
+  volume: number | null;
+  marketCap: number | null;
+  peRatio: number | null;
+  currency: string;
+  sector: string | null;
+  country: string | null;
+  beta: number | null;
+  '52wHigh': number | null;
+  '52wLow': number | null;
+  recommendationKey: string | null;
+}
+
 interface PendingAction {
   tool: string;
   params: Record<string, unknown>;
@@ -155,15 +174,22 @@ interface ToolProgress {
 const TOOLS = [
   { id: 'get_stock_price', name: 'Hisse Fiyatı', icon: BarChart3, color: 'text-emerald-400' },
   { id: 'get_stock_history', name: 'Geçmiş Veri', icon: History, color: 'text-blue-400' },
+  { id: 'get_global_quote', name: 'Global Fiyat', icon: Globe, color: 'text-violet-400' },
+  { id: 'get_global_history', name: 'Global Geçmiş', icon: LineChartIcon, color: 'text-indigo-400' },
+  { id: 'get_financials', name: 'Finansallar', icon: FileText, color: 'text-amber-400' },
+  { id: 'get_options', name: 'Opsiyonlar', icon: Target, color: 'text-orange-400' },
+  { id: 'compare_stocks', name: 'Karşılaştır', icon: BarChart3, color: 'text-pink-400' },
+  { id: 'search_ticker', name: 'Sembol Ara', icon: Search, color: 'text-slate-400' },
   { id: 'get_watchlist', name: 'Takip Listesi', icon: Star, color: 'text-yellow-400' },
   { id: 'web_search', name: 'Web Araması', icon: Globe, color: 'text-purple-400' },
   { id: 'get_kap_data', name: 'KAP Verileri', icon: Building2, color: 'text-cyan-400' },
   { id: 'scan_market', name: 'Piyasa Tarama', icon: Scan, color: 'text-pink-400' },
-  { id: 'get_top_gainers', name: 'Yükselenler', icon: ArrowUpRight, color: 'text-emerald-400' },
-  { id: 'get_top_losers', name: 'Düşenler', icon: ArrowDownRight, color: 'text-red-400' },
   { id: 'analyze_chart_image', name: 'Grafik Analizi', icon: LineChartIcon, color: 'text-violet-400' },
   { id: 'read_txt_file', name: 'TXT Analizi', icon: FileText, color: 'text-amber-400' },
 ];
+
+// Default global symbols to track
+const DEFAULT_GLOBAL_SYMBOLS = ['AAPL', 'TSLA', 'MSFT', 'GOOG', 'AMZN', 'NVDA', 'META', 'BTC-USD', 'ETH-USD', 'SPY'];
 
 // ============================================
 // TAB DEFINITIONS
@@ -172,6 +198,7 @@ const TOOLS = [
 const TABS = [
   { id: 'dashboard', label: 'Ana Sayfa', icon: LayoutDashboard },
   { id: 'stocks', label: 'Hisseler', icon: Database },
+  { id: 'global', label: 'Global', icon: Globe },
   { id: 'watchlist', label: 'Takip Listem', icon: Star },
   { id: 'alerts', label: 'Bildirimler', icon: Bell },
 ];
@@ -215,6 +242,13 @@ export default function Home() {
   const [trend, setTrend] = useState<string | null>(null);
   const [chartTimeframe, setChartTimeframe] = useState('1M');
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // Global stocks (yfinance)
+  const [globalQuotes, setGlobalQuotes] = useState<GlobalQuote[]>([]);
+  const [globalLoading, setGlobalLoading] = useState(false);
+  const [globalSymbolInput, setGlobalSymbolInput] = useState('');
+  const [globalSearchResult, setGlobalSearchResult] = useState<GlobalQuote | null>(null);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
 
   // AI Agent
   const [agentOpen, setAgentOpen] = useState(false);
@@ -304,6 +338,42 @@ export default function Home() {
     } catch { }
   }, []);
 
+  const fetchGlobalQuotes = useCallback(async (symbols: string[] = DEFAULT_GLOBAL_SYMBOLS) => {
+    setGlobalLoading(true);
+    try {
+      const results = await Promise.allSettled(
+        symbols.map(sym =>
+          fetch(`/api/yfinance?action=quote&symbol=${sym}`).then(r => r.json())
+        )
+      );
+      const quotes: GlobalQuote[] = results
+        .filter((r): r is PromiseFulfilledResult<GlobalQuote> => r.status === 'fulfilled' && !r.value.error)
+        .map(r => r.value);
+      setGlobalQuotes(quotes);
+    } catch { } finally {
+      setGlobalLoading(false);
+    }
+  }, []);
+
+  const searchGlobalSymbol = async (symbol: string) => {
+    if (!symbol.trim()) return;
+    setGlobalSearchLoading(true);
+    setGlobalSearchResult(null);
+    try {
+      const response = await fetch(`/api/yfinance?action=quote&symbol=${symbol.trim().toUpperCase()}`);
+      const data = await response.json();
+      if (!data.error) {
+        setGlobalSearchResult(data as GlobalQuote);
+      } else {
+        toast({ title: 'Bulunamadı', description: `${symbol} için veri alınamadı`, variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Hata', description: 'Bağlantı hatası', variant: 'destructive' });
+    } finally {
+      setGlobalSearchLoading(false);
+    }
+  };
+
   // Initial load
   useEffect(() => {
     fetchStocks();
@@ -311,7 +381,8 @@ export default function Home() {
     fetchAlerts();
     fetchCurrentUser();
     fetchMarketSummary();
-  }, [fetchStocks, fetchWatchlist, fetchAlerts, fetchCurrentUser, fetchMarketSummary]);
+    fetchGlobalQuotes();
+  }, [fetchStocks, fetchWatchlist, fetchAlerts, fetchCurrentUser, fetchMarketSummary, fetchGlobalQuotes]);
 
   // Filter stocks
   useEffect(() => {
@@ -1237,7 +1308,7 @@ export default function Home() {
                             </div>
                             <div>
                               <h3 className="text-lg font-semibold text-white">AI Yatırım Asistanı</h3>
-                              <p className="text-slate-400">Hisse analizi, tahmin ve yatırım önerileri için sorularınızı sorun</p>
+                              <p className="text-slate-400">BIST + Global hisseler, yfinance analizi, web araması — otonom AI agent</p>
                             </div>
                           </div>
                           <Button
@@ -1270,6 +1341,215 @@ export default function Home() {
                     <StockCard key={stock.code} stock={stock} />
                   ))}
                 </ScrollArea>
+              </div>
+            )}
+
+            {/* Global Stocks Tab (yfinance) */}
+            {activeTab === 'global' && (
+              <div className="space-y-6">
+                {/* Search bar */}
+                <div className="bg-slate-900 rounded-xl border border-slate-800 p-4">
+                  <h3 className="font-semibold text-white flex items-center gap-2 mb-4">
+                    <Globe className="h-5 w-5 text-violet-400" />
+                    Global Hisse / ETF / Kripto Ara
+                    <Badge variant="secondary" className="bg-violet-900/40 text-violet-300 text-xs">yfinance</Badge>
+                  </h3>
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="Sembol ara: AAPL, TSLA, BTC-USD, SPY..."
+                      value={globalSymbolInput}
+                      onChange={e => setGlobalSymbolInput(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && searchGlobalSymbol(globalSymbolInput)}
+                      className="bg-slate-800 border-slate-700 text-white placeholder:text-slate-500 focus-visible:ring-violet-500"
+                    />
+                    <Button
+                      onClick={() => searchGlobalSymbol(globalSymbolInput)}
+                      disabled={globalSearchLoading || !globalSymbolInput.trim()}
+                      className="bg-violet-600 hover:bg-violet-700"
+                    >
+                      {globalSearchLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                    </Button>
+                  </div>
+
+                  {/* Search result */}
+                  {globalSearchResult && (
+                    <div className="mt-4 p-4 bg-slate-800 rounded-lg border border-violet-800/30">
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-white text-lg">{globalSearchResult.symbol}</span>
+                            <Badge variant="secondary" className="bg-slate-700 text-slate-300">{globalSearchResult.currency}</Badge>
+                            {globalSearchResult.sector && (
+                              <Badge variant="secondary" className="bg-violet-900/40 text-violet-300">{globalSearchResult.sector}</Badge>
+                            )}
+                          </div>
+                          <p className="text-slate-400 text-sm mt-1">{globalSearchResult.name}</p>
+                        </div>
+                        <div className="text-right">
+                          {globalSearchResult.price != null && (
+                            <>
+                              <p className="text-xl font-bold text-white">
+                                {globalSearchResult.price.toFixed(2)} {globalSearchResult.currency}
+                              </p>
+                              {globalSearchResult.previousClose != null && (
+                                <p className={`text-sm ${((globalSearchResult.price - globalSearchResult.previousClose) / globalSearchResult.previousClose) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {((globalSearchResult.price - globalSearchResult.previousClose) / globalSearchResult.previousClose * 100).toFixed(2)}%
+                                </p>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 mt-4 text-sm">
+                        {globalSearchResult.marketCap != null && (
+                          <div><p className="text-slate-500">Piyasa Değeri</p><p className="text-white font-medium">${(globalSearchResult.marketCap / 1e9).toFixed(2)}B</p></div>
+                        )}
+                        {globalSearchResult.peRatio != null && (
+                          <div><p className="text-slate-500">F/K</p><p className="text-white font-medium">{globalSearchResult.peRatio.toFixed(2)}</p></div>
+                        )}
+                        {globalSearchResult.beta != null && (
+                          <div><p className="text-slate-500">Beta</p><p className="text-white font-medium">{globalSearchResult.beta.toFixed(2)}</p></div>
+                        )}
+                        {globalSearchResult['52wHigh'] != null && (
+                          <div><p className="text-slate-500">52h Yüksek</p><p className="text-emerald-400 font-medium">{globalSearchResult['52wHigh'].toFixed(2)}</p></div>
+                        )}
+                        {globalSearchResult['52wLow'] != null && (
+                          <div><p className="text-slate-500">52h Düşük</p><p className="text-red-400 font-medium">{globalSearchResult['52wLow'].toFixed(2)}</p></div>
+                        )}
+                        {globalSearchResult.recommendationKey && (
+                          <div><p className="text-slate-500">Analist</p><p className="text-amber-400 font-medium uppercase">{globalSearchResult.recommendationKey}</p></div>
+                        )}
+                      </div>
+                      <div className="mt-3 flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-slate-600 text-slate-300 hover:bg-slate-700"
+                          onClick={() => {
+                            setChatInput(`${globalSearchResult.symbol} hissesini detaylı analiz et`);
+                            setAgentOpen(true);
+                          }}
+                        >
+                          <Bot className="h-3 w-3 mr-1" />
+                          AI Analiz
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Popular global quotes */}
+                <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
+                  <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+                    <h3 className="font-semibold text-white flex items-center gap-2">
+                      <Globe className="h-5 w-5 text-violet-400" />
+                      Popüler Global Hisseler
+                    </h3>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => fetchGlobalQuotes()}
+                      disabled={globalLoading}
+                      className="text-slate-400 hover:text-white"
+                    >
+                      <RefreshCw className={`h-4 w-4 ${globalLoading ? 'animate-spin' : ''}`} />
+                    </Button>
+                  </div>
+
+                  {globalLoading && globalQuotes.length === 0 ? (
+                    <div className="p-8 flex items-center justify-center gap-2 text-slate-500">
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      <span>yfinance verisi alınıyor...</span>
+                    </div>
+                  ) : globalQuotes.length > 0 ? (
+                    globalQuotes.map((q) => {
+                      const chgPct = q.price != null && q.previousClose != null && q.previousClose !== 0
+                        ? (q.price - q.previousClose) / q.previousClose * 100
+                        : null;
+                      return (
+                        <div
+                          key={q.symbol}
+                          className="flex items-center justify-between p-3 hover:bg-slate-800/50 border-b border-slate-800 last:border-0 cursor-pointer transition-colors"
+                          onClick={() => {
+                            setChatInput(`${q.symbol} hissesini detaylı analiz et`);
+                            setAgentOpen(true);
+                          }}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center font-bold text-sm ${(chgPct ?? 0) >= 0 ? 'bg-emerald-600/20 text-emerald-400' : 'bg-red-600/20 text-red-400'}`}>
+                              {q.symbol.replace('-USD', '').slice(0, 2)}
+                            </div>
+                            <div>
+                              <p className="font-medium text-white">{q.symbol}</p>
+                              <p className="text-xs text-slate-500 truncate max-w-[140px]">{q.name}</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className="text-right">
+                              <p className="font-medium text-white">
+                                {q.price != null ? `${q.price.toFixed(2)} ${q.currency}` : 'N/A'}
+                              </p>
+                              {chgPct != null && (
+                                <p className={`text-sm flex items-center justify-end gap-1 ${chgPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                  {chgPct >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+                                  {chgPct >= 0 ? '+' : ''}{chgPct.toFixed(2)}%
+                                </p>
+                              )}
+                            </div>
+                            {q.marketCap != null && (
+                              <div className="hidden sm:block text-right">
+                                <p className="text-xs text-slate-500">Piyasa Değeri</p>
+                                <p className="text-xs text-slate-300">${(q.marketCap / 1e9).toFixed(1)}B</p>
+                              </div>
+                            )}
+                            <Bot className="h-4 w-4 text-slate-600" />
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="p-8 text-center">
+                      <Globe className="h-12 w-12 text-slate-700 mx-auto mb-4" />
+                      <p className="text-slate-500">yfinance servisi bağlantı bekliyor</p>
+                      <p className="text-slate-600 text-sm mt-2">mini-services/yfinance-service/start.sh çalıştırın</p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-4 border-slate-700"
+                        onClick={() => fetchGlobalQuotes()}
+                      >
+                        Tekrar Dene
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Global AI agent quick prompts */}
+                <div className="bg-slate-900 rounded-xl border border-slate-800 p-4">
+                  <h3 className="font-semibold text-white flex items-center gap-2 mb-3">
+                    <Sparkles className="h-5 w-5 text-amber-400" />
+                    Hızlı AI Analiz Soruları
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {[
+                      { label: 'AAPL teknik analiz', q: 'AAPL Apple hissesini teknik olarak analiz et, RSI ve trend göster' },
+                      { label: 'TSLA son haberler', q: 'TSLA Tesla hakkında son haberleri ve analist görüşlerini getir' },
+                      { label: 'BTC-USD kripto analiz', q: 'Bitcoin BTC-USD fiyat analizi yap, destek direnç seviyelerini belirt' },
+                      { label: 'SPY S&P500 ETF', q: 'SPY S&P 500 ETF analiz et, piyasa durumu ne?' },
+                      { label: 'MSFT vs AAPL karşılaştır', q: 'MSFT ve AAPL hisselerini son 3 ayda karşılaştır' },
+                      { label: 'NVDA finansal analiz', q: 'NVDA Nvidia finansal tablolarını ve büyüme metriklerini analiz et' },
+                    ].map(({ label, q }) => (
+                      <button
+                        key={label}
+                        onClick={() => { setChatInput(q); setAgentOpen(true); }}
+                        className="text-left p-3 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 text-sm transition-colors border border-slate-700 hover:border-violet-500/50"
+                      >
+                        <span className="text-violet-400 font-medium">{label}</span>
+                        <p className="text-slate-500 text-xs mt-1 truncate">{q}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1548,7 +1828,11 @@ export default function Home() {
               AI Yatırım Asistanı
               <Badge variant="outline" className="ml-2 border-emerald-600 text-emerald-400">
                 <Zap className="h-3 w-3 mr-1" />
-                15 Araç
+                Open Agent
+              </Badge>
+              <Badge variant="outline" className="ml-1 border-violet-600 text-violet-400">
+                <Globe className="h-3 w-3 mr-1" />
+                yfinance
               </Badge>
             </DialogTitle>
           </DialogHeader>
@@ -1581,10 +1865,12 @@ export default function Home() {
                 <p className="text-slate-500 mb-4">Merhaba! Size nasıl yardımcı olabilirim?</p>
                 <div className="grid grid-cols-1 gap-2 w-full max-w-md">
                   {[
-                    'THYAO hissesi analizi, ne yapmalıyım?',
-                    '50.000 liram var, nereye yatırım yapmalıyım?',
-                    'Bugün en çok yükselen hisseler hangileri?',
-                    'ASELS hissesini satmalı mıyım?'
+                    'THYAO hissesi analizi, teknik göstergeleri neler?',
+                    'AAPL Apple hissesini analiz et, finansallarına bak',
+                    'TSLA ve AAPL son 3 ayda nasıl performans gösterdi?',
+                    'BTC-USD Bitcoin teknik analizi yap',
+                    'Bugün BIST\'te en çok yükselen hisseler hangileri?',
+                    'NVDA Nvidia\'nın bilanço ve gelir tablosunu incele',
                   ].map((q, i) => (
                     <button
                       key={i}
