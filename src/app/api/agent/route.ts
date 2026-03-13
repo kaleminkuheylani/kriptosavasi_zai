@@ -664,6 +664,7 @@ interface AgentMessage {
   content: string;
   tool_call_id?: string;
   name?: string;
+  tool_calls?: ToolCall[];
 }
 
 interface ToolCall {
@@ -728,9 +729,11 @@ KURALLAR:
         temperature: 0.3,
       });
     } catch {
-      // Fallback: LLM without tool calling
+      // Fallback: LLM without tool calling - only include non-tool messages
       const fallbackResp = await zai.chat.completions.create({
-        messages: messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+        messages: messages
+          .filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.tool_calls?.length))
+          .map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
         max_tokens: 2000,
         temperature: 0.5,
       });
@@ -761,8 +764,8 @@ KURALLAR:
     messages.push({
       role: 'assistant',
       content: assistantMessage.content || '',
-      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } as unknown as object : {})
-    } as AgentMessage);
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+    });
 
     // Execute each tool call
     for (const toolCall of toolCalls) {
@@ -816,7 +819,15 @@ KURALLAR:
   // Max iterations reached - generate final response from collected data
   const finalResp = await zai.chat.completions.create({
     messages: [
-      ...messages.map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+      ...messages.map(m => {
+        if (m.role === 'tool') {
+          return { role: 'tool' as const, content: m.content, tool_call_id: m.tool_call_id || 'unknown', name: m.name };
+        }
+        if (m.role === 'assistant' && m.tool_calls?.length) {
+          return { role: 'assistant' as const, content: m.content || '', tool_calls: m.tool_calls };
+        }
+        return { role: m.role as 'system' | 'user' | 'assistant', content: m.content };
+      }),
       { role: 'user', content: 'Tüm verileri analiz ederek kapsamlı bir sonuç yaz.' }
     ],
     max_tokens: 2000,
