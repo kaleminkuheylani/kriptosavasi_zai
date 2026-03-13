@@ -574,6 +574,7 @@ async function analyzeChartImage(imageBase64: string, symbol?: string): Promise<
   try {
     const zai = await ZAI.create();
     const response = await zai.chat.completions.createVision({
+      model: 'glm-4v-plus',
       messages: [{
         role: 'user',
         content: [
@@ -730,17 +731,21 @@ KURALLAR:
       });
     } catch {
       // Fallback: LLM without tool calling - only include non-tool messages
-      const fallbackResp = await zai.chat.completions.create({
-        messages: messages
-          .filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.tool_calls?.length))
-          .map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
-        max_tokens: 2000,
-        temperature: 0.5,
-      });
-      return {
-        response: fallbackResp.choices?.[0]?.message?.content || 'Analiz tamamlandı.',
-        toolsUsed
-      };
+      try {
+        const fallbackResp = await zai.chat.completions.create({
+          messages: messages
+            .filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.tool_calls?.length))
+            .map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
+          max_tokens: 2000,
+          temperature: 0.5,
+        });
+        return {
+          response: fallbackResp.choices?.[0]?.message?.content || generateContextualResponse(toolResultsMap),
+          toolsUsed
+        };
+      } catch {
+        return { response: generateContextualResponse(toolResultsMap), toolsUsed };
+      }
     }
 
     const choice = llmResponse.choices?.[0];
@@ -817,27 +822,31 @@ KURALLAR:
   }
 
   // Max iterations reached - generate final response from collected data
-  const finalResp = await zai.chat.completions.create({
-    messages: [
-      ...messages.map(m => {
-        if (m.role === 'tool') {
-          return { role: 'tool' as const, content: m.content, tool_call_id: m.tool_call_id || 'unknown', name: m.name };
-        }
-        if (m.role === 'assistant' && m.tool_calls?.length) {
-          return { role: 'assistant' as const, content: m.content || '', tool_calls: m.tool_calls };
-        }
-        return { role: m.role as 'system' | 'user' | 'assistant', content: m.content };
-      }),
-      { role: 'user', content: 'Tüm verileri analiz ederek kapsamlı bir sonuç yaz.' }
-    ],
-    max_tokens: 2000,
-    temperature: 0.5,
-  });
+  try {
+    const finalResp = await zai.chat.completions.create({
+      messages: [
+        ...messages.map(m => {
+          if (m.role === 'tool') {
+            return { role: 'tool' as const, content: m.content, tool_call_id: m.tool_call_id || 'unknown', name: m.name };
+          }
+          if (m.role === 'assistant' && m.tool_calls?.length) {
+            return { role: 'assistant' as const, content: m.content || '', tool_calls: m.tool_calls };
+          }
+          return { role: m.role as 'system' | 'user' | 'assistant', content: m.content };
+        }),
+        { role: 'user', content: 'Tüm verileri analiz ederek kapsamlı bir sonuç yaz.' }
+      ],
+      max_tokens: 2000,
+      temperature: 0.5,
+    });
 
-  return {
-    response: finalResp.choices?.[0]?.message?.content || generateContextualResponse(toolResultsMap),
-    toolsUsed
-  };
+    return {
+      response: finalResp.choices?.[0]?.message?.content || generateContextualResponse(toolResultsMap),
+      toolsUsed
+    };
+  } catch {
+    return { response: generateContextualResponse(toolResultsMap), toolsUsed };
+  }
 }
 
 // ============================================
@@ -1031,10 +1040,13 @@ export async function POST(request: NextRequest) {
         await writer.close();
       } catch (error) {
         console.error('Agent loop error:', error);
-        await writer.write(encoder.encode({
-          type: 'error',
-          data: { error: 'İşlem sırasında hata oluştu' }
-        }));
+        const errorMessage = error instanceof Error ? error.message : 'İşlem sırasında hata oluştu';
+        try {
+          await writer.write(encoder.encode({
+            type: 'error',
+            data: { error: errorMessage }
+          }));
+        } catch { /* stream already closed */ }
         try { await writer.close(); } catch { /* already closed */ }
       }
     })();
