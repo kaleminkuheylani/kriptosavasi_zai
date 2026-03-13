@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "db:init": "bun src/lib/db-init.ts"
+    "db:init": "bun src/lib/db-init.ts",
+    "yfinance": "cd mini-services/yfinance-service && uvicorn main:app --host 0.0.0.0 --port 8001"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

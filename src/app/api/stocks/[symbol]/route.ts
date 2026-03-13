@@ -77,7 +77,12 @@ async function getStockHistory(symbol: string, period: string = '1M') {
         close: number;
         volume: number;
       }>)
-        .filter((e) => e.date_utc >= cutoff)
+        .filter((e) => {
+          if (!e.date) return false;
+          if (e.date_utc) return e.date_utc >= cutoff;
+          // fallback: parse date string when date_utc is missing
+          return new Date(e.date).getTime() / 1000 >= cutoff;
+        })
         .map((e) => ({
           date: e.date,
           open: e.open,
