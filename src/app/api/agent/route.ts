@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
-import { getSupabase } from '@/lib/supabase';
 import ZAI from 'z-ai-web-dev-sdk';
 
 // ============================================
@@ -39,22 +38,12 @@ interface SSEMessage {
 // ============================================
 
 const TOOLS_INFO: Record<string, { name: string; description: string }> = {
-  get_stock_price:         { name: 'Hisse Fiyatı',    description: 'BIST güncel fiyat verisi alınıyor...' },
-  get_stock_history:       { name: 'Geçmiş Veri',     description: 'BIST tarihsel veriler analiz ediliyor...' },
-  get_global_quote:        { name: 'Global Fiyat',    description: 'Global hisse fiyatı yfinance\'tan alınıyor...' },
-  get_global_history:      { name: 'Global Geçmiş',   description: 'Global tarihsel veri analiz ediliyor...' },
-  get_financials:          { name: 'Finansallar',     description: 'Bilanço ve gelir tablosu alınıyor...' },
-  get_options:             { name: 'Opsiyon Zinciri', description: 'Opsiyon verileri alınıyor...' },
-  search_ticker:           { name: 'Sembol Ara',      description: 'Hisse sembolü aranıyor...' },
-  compare_stocks:          { name: 'Karşılaştırma',   description: 'Hisseler karşılaştırılıyor...' },
-  get_watchlist:           { name: 'Takip Listesi',   description: 'Takip listesi kontrol ediliyor...' },
-  add_to_watchlist:        { name: 'Takibe Ekle',     description: 'Hisse takibe ekleniyor...' },
-  remove_from_watchlist:   { name: 'Takipten Çık',    description: 'Hisse takipten çıkarılıyor...' },
-  web_search:              { name: 'Web Araması',     description: 'Web\'de arama yapılıyor...' },
-  get_kap_data:            { name: 'KAP Verileri',    description: 'KAP bildirimleri alınıyor...' },
-  get_news:                { name: 'Haberler',        description: 'Finansal haberler alınıyor...' },
-  analyze_chart_image:     { name: 'Grafik Analizi',  description: 'Grafik analiz ediliyor...' },
-  read_txt_file:           { name: 'TXT Analizi',     description: 'Dosya analiz ediliyor...' },
+  get_stock_price:     { name: 'Hisse Fiyatı',  description: 'BIST güncel fiyat verisi alınıyor...' },
+  get_global_quote:    { name: 'Global Fiyat',  description: 'Global hisse fiyatı yfinance\'tan alınıyor...' },
+  get_global_history:  { name: 'Global Geçmiş', description: 'Global tarihsel veri analiz ediliyor...' },
+  web_search:          { name: 'Web Araması',   description: 'Web\'de arama yapılıyor...' },
+  analyze_chart_image: { name: 'Grafik Analizi', description: 'Grafik analiz ediliyor...' },
+  read_txt_file:       { name: 'TXT Analizi',   description: 'Dosya analiz ediliyor...' },
 };
 
 // OpenAI-style tool schema for the autonomous agent loop
@@ -68,21 +57,6 @@ const TOOL_SCHEMAS = [
         type: 'object',
         properties: {
           symbol: { type: 'string', description: 'BIST ticker symbol e.g. THYAO, GARAN' }
-        },
-        required: ['symbol']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_stock_history',
-      description: 'Get BIST stock historical data and technical indicators (SMA, RSI, trend).',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'BIST ticker symbol' },
-          period: { type: 'string', enum: ['1M', '3M', '6M', '1Y'], description: 'Time period' }
         },
         required: ['symbol']
       }
@@ -121,63 +95,6 @@ const TOOL_SCHEMAS = [
   {
     type: 'function',
     function: {
-      name: 'get_financials',
-      description: 'Get financial statements (income statement, balance sheet, cash flow) for a global stock.',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Yahoo Finance symbol' }
-        },
-        required: ['symbol']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_options',
-      description: 'Get options chain data for a global stock.',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Yahoo Finance symbol' }
-        },
-        required: ['symbol']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'search_ticker',
-      description: 'Search for a ticker symbol by company name.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Company name or partial symbol' }
-        },
-        required: ['query']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'compare_stocks',
-      description: 'Compare performance of multiple global stocks over a period.',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbols: { type: 'string', description: 'Comma-separated symbols e.g. AAPL,MSFT,GOOG' },
-          period: { type: 'string', enum: ['1mo', '3mo', '6mo', '1y'], description: 'Time period' }
-        },
-        required: ['symbols']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
       name: 'web_search',
       description: 'Search the web for latest financial news, analysis, or any information.',
       parameters: {
@@ -189,69 +106,6 @@ const TOOL_SCHEMAS = [
       }
     }
   },
-  {
-    type: 'function',
-    function: {
-      name: 'get_news',
-      description: 'Get latest financial news for a specific stock or general BIST market.',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'Optional stock symbol. Leave empty for general market news.' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_kap_data',
-      description: 'Get KAP (Public Disclosure Platform) announcements for a BIST stock.',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string', description: 'BIST ticker symbol' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'get_watchlist',
-      description: 'Get the user\'s current watchlist.',
-      parameters: { type: 'object', properties: {} }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'add_to_watchlist',
-      description: 'Add a stock to the user\'s watchlist.',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string' },
-          name: { type: 'string' }
-        },
-        required: ['symbol', 'name']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'remove_from_watchlist',
-      description: 'Remove a stock from the user\'s watchlist.',
-      parameters: {
-        type: 'object',
-        properties: {
-          symbol: { type: 'string' }
-        },
-        required: ['symbol']
-      }
-    }
-  },
 ];
 
 // ============================================
@@ -260,6 +114,34 @@ const TOOL_SCHEMAS = [
 
 const stockPriceCache: Map<string, { data: unknown; timestamp: number }> = new Map();
 const CACHE_TTL = 60000;
+
+// ============================================
+// DAILY RATE LIMITING
+// ============================================
+
+const DAILY_REQUEST_LIMIT = 10;
+const dailyUsage: Map<string, { count: number; date: string }> = new Map();
+
+function getTodayDate(): string {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function checkAndIncrementUsage(userId: string): { allowed: boolean; remaining: number } {
+  const today = getTodayDate();
+  const usage = dailyUsage.get(userId);
+
+  if (!usage || usage.date !== today) {
+    dailyUsage.set(userId, { count: 1, date: today });
+    return { allowed: true, remaining: DAILY_REQUEST_LIMIT - 1 };
+  }
+
+  if (usage.count >= DAILY_REQUEST_LIMIT) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  usage.count += 1;
+  return { allowed: true, remaining: DAILY_REQUEST_LIMIT - usage.count };
+}
 
 // ============================================
 // SSE HELPER
@@ -441,74 +323,8 @@ async function getGlobalHistory(symbol: string, period = '3mo', interval = '1d')
   return callYFinance('history', { symbol, period, interval });
 }
 
-async function getFinancials(symbol: string): Promise<ToolResult> {
-  return callYFinance('financials', { symbol });
-}
-
-async function getOptions(symbol: string): Promise<ToolResult> {
-  return callYFinance('options', { symbol });
-}
-
-async function searchTicker(query: string): Promise<ToolResult> {
-  return callYFinance('search', { q: query });
-}
-
-async function compareStocks(symbols: string, period = '3mo'): Promise<ToolResult> {
-  return callYFinance('compare', { symbols, period });
-}
-
 // ============================================
-// WATCHLIST & SOCIAL TOOLS
-// ============================================
-
-async function getWatchlist(userId: string | null): Promise<ToolResult> {
-  const startTime = Date.now();
-  try {
-    const supabase = getSupabase();
-    let query = supabase.from('watchlist').select('*').order('created_at', { ascending: false });
-    if (userId) query = query.eq('user_id', userId);
-    else query = query.is('user_id', null);
-    const { data, error } = await query;
-    if (error) throw error;
-    return { success: true, data: data || [], _meta: { tool: 'get_watchlist', duration: Date.now() - startTime } };
-  } catch (error) {
-    return { success: false, error: String(error), _meta: { tool: 'get_watchlist', duration: Date.now() - startTime } };
-  }
-}
-
-async function addToWatchlist(symbol: string, name: string, userId: string | null): Promise<ToolResult> {
-  const startTime = Date.now();
-  try {
-    const supabase = getSupabase();
-    const { data, error } = await supabase
-      .from('watchlist')
-      .insert({ symbol: symbol.toUpperCase(), name, user_id: userId })
-      .select()
-      .single();
-    if (error && error.code !== '23505') throw error;
-    return { success: true, data, _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
-  } catch (error) {
-    return { success: false, error: String(error), _meta: { tool: 'add_to_watchlist', duration: Date.now() - startTime } };
-  }
-}
-
-async function removeFromWatchlist(symbol: string, userId: string | null): Promise<ToolResult> {
-  const startTime = Date.now();
-  try {
-    const supabase = getSupabase();
-    let query = supabase.from('watchlist').delete().eq('symbol', symbol.toUpperCase());
-    if (userId) query = query.eq('user_id', userId);
-    else query = query.is('user_id', null);
-    const { error } = await query;
-    if (error) throw error;
-    return { success: true, _meta: { tool: 'remove_from_watchlist', duration: Date.now() - startTime } };
-  } catch (error) {
-    return { success: false, error: String(error), _meta: { tool: 'remove_from_watchlist', duration: Date.now() - startTime } };
-  }
-}
-
-// ============================================
-// WEB SEARCH & NEWS TOOLS
+// WEB SEARCH TOOL
 // ============================================
 
 async function webSearch(query: string): Promise<ToolResult> {
@@ -519,53 +335,6 @@ async function webSearch(query: string): Promise<ToolResult> {
     return { success: true, data: results, _meta: { tool: 'web_search', duration: Date.now() - startTime } };
   } catch (error) {
     return { success: false, error: String(error), _meta: { tool: 'web_search', duration: Date.now() - startTime } };
-  }
-}
-
-async function getKapData(symbol?: string): Promise<ToolResult> {
-  const startTime = Date.now();
-  try {
-    const zai = await ZAI.create();
-    const query = symbol ? `${symbol} hisse KAP bildirim` : 'BIST KAP bildirim bugün';
-    const results = await zai.functions.invoke('web_search', { query, num: 10 });
-    return { success: true, data: results, _meta: { tool: 'get_kap_data', duration: Date.now() - startTime } };
-  } catch (error) {
-    return { success: false, error: String(error), _meta: { tool: 'get_kap_data', duration: Date.now() - startTime } };
-  }
-}
-
-async function getNews(symbol?: string): Promise<ToolResult> {
-  const startTime = Date.now();
-  try {
-    const zai = await ZAI.create();
-    const queries = symbol
-      ? [`${symbol} hisse haberi son dakika`, `${symbol} borsa analizi yorum`, `KAP ${symbol} bildirim`]
-      : ['BIST 100 borsa haberi bugün', 'Türkiye borsa son dakika', 'BIST piyasa analizi'];
-
-    const results = await Promise.all(queries.map(q => zai.functions.invoke('web_search', { query: q, num: 5 })));
-
-    const allNews: Array<{ title: string; summary: string; source: string; url: string; date?: string }> = [];
-    const seen = new Set<string>();
-
-    for (const result of results) {
-      if (Array.isArray(result)) {
-        for (const item of result) {
-          const title = item.name || item.title || '';
-          if (title && !seen.has(title)) {
-            seen.add(title);
-            allNews.push({ title, summary: item.snippet || item.description || '', source: item.host_name || 'BIST', url: item.url || '', date: item.date });
-          }
-        }
-      }
-    }
-
-    return {
-      success: true,
-      data: { symbol: symbol || 'BIST 100', news: allNews.slice(0, 10), total: allNews.length, timestamp: new Date().toISOString() },
-      _meta: { tool: 'get_news', duration: Date.now() - startTime }
-    };
-  } catch (error) {
-    return { success: false, error: String(error), _meta: { tool: 'get_news', duration: Date.now() - startTime } };
   }
 }
 
@@ -604,7 +373,7 @@ async function readTxtFile(content: string, filename?: string): Promise<ToolResu
         { role: 'system', content: 'Sen finansal analiz asistanısın. TXT dosyasını analiz et ve önemli bilgileri çıkar.' },
         { role: 'user', content: `Dosya: ${filename || 'bilinmiyor'}\n\n${content.slice(0, 8000)}` }
       ],
-      max_tokens: 1500
+      max_tokens: 100
     });
 
     return {
@@ -621,36 +390,16 @@ async function readTxtFile(content: string, filename?: string): Promise<ToolResu
 // UNIFIED TOOL EXECUTOR
 // ============================================
 
-async function executeTool(toolName: string, params: Record<string, unknown>, userId: string | null): Promise<ToolResult> {
+async function executeTool(toolName: string, params: Record<string, unknown>): Promise<ToolResult> {
   switch (toolName) {
     case 'get_stock_price':
       return getStockPrice(params.symbol as string);
-    case 'get_stock_history':
-      return getStockHistory(params.symbol as string, params.period as string);
     case 'get_global_quote':
       return getGlobalQuote(params.symbol as string);
     case 'get_global_history':
       return getGlobalHistory(params.symbol as string, params.period as string, params.interval as string);
-    case 'get_financials':
-      return getFinancials(params.symbol as string);
-    case 'get_options':
-      return getOptions(params.symbol as string);
-    case 'search_ticker':
-      return searchTicker(params.query as string);
-    case 'compare_stocks':
-      return compareStocks(params.symbols as string, params.period as string);
-    case 'get_watchlist':
-      return getWatchlist(userId);
-    case 'add_to_watchlist':
-      return addToWatchlist(params.symbol as string, params.name as string, userId);
-    case 'remove_from_watchlist':
-      return removeFromWatchlist(params.symbol as string, userId);
     case 'web_search':
       return webSearch(params.query as string);
-    case 'get_kap_data':
-      return getKapData(params.symbol as string | undefined);
-    case 'get_news':
-      return getNews(params.symbol as string | undefined);
     default:
       return { success: false, error: `Bilinmeyen araç: ${toolName}` };
   }
@@ -726,7 +475,7 @@ KURALLAR:
         messages,
         tools: TOOL_SCHEMAS,
         tool_choice: iteration === 0 ? 'auto' : 'auto',
-        max_tokens: 2500,
+        max_tokens: 100,
         temperature: 0.3,
       });
     } catch {
@@ -736,7 +485,7 @@ KURALLAR:
           messages: messages
             .filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.tool_calls?.length))
             .map(m => ({ role: m.role as 'system' | 'user' | 'assistant', content: m.content })),
-          max_tokens: 2000,
+          max_tokens: 100,
           temperature: 0.5,
         });
         return {
@@ -792,7 +541,7 @@ KURALLAR:
       }));
 
       // Execute tool
-      const result = await executeTool(toolName, params, userId);
+      const result = await executeTool(toolName, params);
       toolsUsed.push(toolName);
       toolResultsMap.set(toolName, result);
 
@@ -836,7 +585,7 @@ KURALLAR:
         }),
         { role: 'user', content: 'Tüm verileri analiz ederek kapsamlı bir sonuç yaz.' }
       ],
-      max_tokens: 2000,
+      max_tokens: 100,
       temperature: 0.5,
     });
 
@@ -990,30 +739,34 @@ export async function POST(request: NextRequest) {
               const d = priceResult.data as { symbol: string; name: string; price: number; changePercent: number };
               basicResponse += `## 📊 ${d.symbol} - ${d.name}\n\n**Fiyat:** ${d.price} ₺\n**Değişim:** ${d.changePercent >= 0 ? '+' : ''}${d.changePercent}%\n\n`;
             }
-            const newsResult = await getNews(symbols[0] as string);
-            if (newsResult.success && newsResult.data) {
-              const data = newsResult.data as { news?: Array<{ title: string; source: string }> };
-              if (data.news?.length) {
-                basicResponse += `## 📰 Son Haberler\n\n`;
-                data.news.slice(0, 3).forEach((n, i) => { basicResponse += `${i + 1}. ${n.title} (${n.source})\n`; });
-              }
-            }
           } else {
-            const newsResult = await getNews();
-            if (newsResult.success && newsResult.data) {
-              const data = newsResult.data as { news?: Array<{ title: string; source: string }> };
-              basicResponse = `## 📰 BIST Güncel Haberler\n\n`;
-              data.news?.slice(0, 5).forEach((n, i) => { basicResponse += `${i + 1}. ${n.title} (${n.source})\n`; });
-            }
+            basicResponse = `## 📊 BIST Piyasası\n\nGüncel fiyat bilgisi için bir hisse sembolü yazın (örn: THYAO, GARAN, ASELS).\n\n`;
           }
 
-          basicResponse += `\n\n---\n⚠️ **Kayıt olmadan sadece temel bilgileri görebilirsiniz.**\nDetaylı analiz için lütfen giriş yapın.`;
+          basicResponse += `\n\n---\n⚠️ **Kayıt olmadan sadece temel fiyat bilgisi görebilirsiniz.**\nDetaylı analiz için lütfen giriş yapın.`;
           await writer.write(encoder.encode({
             type: 'complete',
-            data: { response: basicResponse, toolsUsed: ['get_stock_price', 'get_news'] as string[], queryType: 'basic', symbols, requiresAuth: true }
+            data: { response: basicResponse, toolsUsed: ['get_stock_price'] as string[], queryType: 'basic', symbols, requiresAuth: true }
           }));
           await writer.close();
           return;
+        }
+
+        // Authenticated users: check daily limit
+        const { allowed, remaining } = checkAndIncrementUsage(userId);
+        if (!allowed) {
+          await writer.write(encoder.encode({
+            type: 'error',
+            data: { error: `Günlük ${DAILY_REQUEST_LIMIT} istek limitine ulaştınız. Yarın tekrar deneyin.` }
+          }));
+          await writer.close();
+          return;
+        }
+        if (remaining <= 2) {
+          await writer.write(encoder.encode({
+            type: 'progress',
+            data: { message: `⚠️ Bugün kalan hakkınız: ${remaining} istek` }
+          }));
         }
 
         // Send initial progress
